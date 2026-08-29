@@ -188,34 +188,81 @@ decide which copy is real. (Not deleted yet — flagging for your go-ahead.)
 **Phase 1 — de-risk PDF parsing in Pyodide.** ✅ Done — tested for real in a
 browser, `pdfplumber` cannot run in Pyodide (see above). PDF inputs deferred.
 
-**Phase 2 — skeleton + first working slice.** ✅ Done for the E-Way Bill
-section: Pyodide bootstrap proven in-browser (loads, can fetch/import the
-repo's own vendored `.py` files, `openpyxl` installs and round-trips a real
-`.xlsx`), and `docs/py/web_adapters.py`'s `process_ewb()` runs the real
-`convert_ewb_files.py` + `auto_ewb_merger.py` logic end-to-end against real
-sample data — verified twice: once under plain CPython
-(`docs/py/test_web_adapters.py`), once for real inside Pyodide in a browser,
-both producing identical output (1,147 inward rows, 132 outward rows merged).
-Not yet done: wiring this into the actual mockup UI's dropzones/`app.js` —
-next up.
+**Phase 2 — skeleton + first working slice.** ✅ Done, and expanded well past
+"first slice" — `docs/index.html` + `docs/app.js` is a real, working site
+(not a mockup) covering 6 of the 7 upload sections end-to-end:
 
-**Phase 3 — the 5 `forms merger` return types**, same adapter pattern.
+| Section | Real pipeline wired | Verified against real data |
+|---|---|---|
+| E-Way Bill (in/out) | `convert_ewb_files.py` → `auto_ewb_merger.py` | ✅ CPython + browser |
+| GSTR-1 | `merge_gstr1.py` | ✅ CPython + browser |
+| E-Invoice | `merge_einv.py` | ✅ CPython |
+| GSTR-2B | `complete_workbooks.py` (align) → `merge_gstr2b.py` | ✅ CPython + browser |
+| GSTR-3B | `run.py` (extract zips) → `merge_gstr3b.py` | ✅ CPython + browser |
+| GSTR-2A | `merge_r2a.py` | Code path only — no real GSTR-2A fixtures exist in this repo to test against; UI says so |
+
+"Verified in browser" means: real production `index.html`, real "Try with
+sample data" buttons (fetch real sample bytes, run the actual adapter),
+checked with browser automation — not a separate spike page. Ledgers/Table
+8A/Comparison and the 3 reference masters are wired too (real byte capture,
+no processing needed; masters persist across visits via `localStorage`).
+Annual PDF Reports section is present but disabled with an explanation (see
+Phase 1). Balance Sheet/P&L is a real form. "Run full scrutiny" stays
+disabled on purpose — `main gst tool` isn't wired up yet (next).
+
+**New finding from testing the real page**: Pyodide runs synchronously on
+the main thread, so a multi-second merge **freezes the tab** (confirmed —
+browser automation timed out waiting on a GSTR-2B run). Nothing broke or
+raced (Pyodide's single-threaded execution naturally serializes overlapping
+calls — tested by clicking two sections back-to-back, both came back
+correct), but the frozen-tab UX is real and worth fixing before this goes to
+real users. This is Phase 2's originally-deferred "Web Worker vs main
+thread" decision (see below) — now backed by a real measurement instead of
+a hypothetical.
+
+**Also fixed while building this**: an HTML-escaping bug where a section's
+description text (`GSTR3B_<GSTIN>_<MMYYYY>.zip`) was silently stripped by
+the browser's HTML parser, since raw `<GSTIN>` reads as an unknown tag —
+found by reading the real rendered page, not by inspection.
+
+**Phase 3 — the 5 `forms merger` return types.** ✅ Done (gstr1, gstr2a,
+gstr2b, gstr3b, einv all wired — see Phase 2 table for what's verified).
 
 **Phase 4 — `files out`** (extractor + alligner) as pre-steps feeding the
-GSTR-3B and GSTR-2B sections from Phase 3.
+GSTR-3B and GSTR-2B sections. ✅ Done (folded into Phase 2/3 rather than a
+separate pass — `process_gstr3b`/`process_gstr2b` in `web_adapters.py`).
 
-**Phase 5 — `pdf to excel`** parsers, using whatever Phase 1 concluded.
+**Phase 5 — `pdf to excel`** parsers. Deferred per Phase 1's finding — not
+started.
 
 **Phase 6 — `main gst tool`** itself: assemble everything into one virtual
 folder, run `master_build.main()`, surface the run summary + final workbook
-download.
+download. **Not started — this is the next real chunk of work.** Everything
+up through Phase 4 exists to feed this step; `master_build.py` itself is
+still unverified in this browser environment (12 files, its own dependency
+surface not yet checked against what Pyodide can/can't do the way pdfplumber
+was). The "Run full scrutiny" button is built and visible but deliberately
+kept disabled until this is real.
 
-**Phase 7 — Balance Sheet/P&L form**, replacing the hand-edited `.py` dict.
+**Phase 6.5 — main-thread freeze (new, found while testing Phase 2-4).**
+Confirmed by testing, not assumed: a real merge run blocks the tab for
+several seconds to ~15s depending on file count. Worth fixing before this
+reaches a real user, likely before Phase 6 given `master_build.py` will be
+the heaviest single call by far. Move the Pyodide session into a Web Worker;
+`app.js`'s `runPy()` is already the single choke point every call goes
+through, so this is a contained change (postMessage bridging + a worker
+script), not a rewrite.
 
-**Phase 8 — deploy.** Enable GitHub Pages on this repo pointed at `/docs` on
-`main`. No GitHub Actions needed unless a later phase adds a real build step
-— plain static files are enough. From here on, shipping a fix is just
-`git push`.
+**Phase 7 — Balance Sheet/P&L form.** ✅ Done — real form in `index.html`,
+captured into `workbench.bs_pl` as a plain JS object shaped like the
+existing `BS_PL_DATA` dict, ready for Phase 6 to consume. Currently 6 of the
+~16 line items from `bs_pl_input.py`; the rest are a mechanical addition
+once Phase 6 needs them.
+
+**Phase 8 — deploy.** Not started. Enable GitHub Pages on this repo pointed
+at `/docs` on `main`. No GitHub Actions needed — plain static files are
+enough. From here on, shipping a fix is just `git push`. Reasonable to do
+this once Phase 6 lands, so there's something end-to-end to actually show.
 
 ## Open items
 

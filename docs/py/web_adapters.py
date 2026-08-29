@@ -13,20 +13,52 @@ fast local testing — see test_web_adapters.py) and under Pyodide in the
 browser (see app.js). Nothing here is Pyodide-specific.
 """
 
+import glob
+import importlib
 import os
 import sys
-import glob
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-for _sub in ("ewb", "merge", "pdf", "extract_align", "core"):
+# Only "ewb" and "core" are safe to leave permanently on sys.path: every
+# module name in them is unique. "merge" is deliberately NOT added here —
+# its 5 subfolders (gstr1/gstr2a/gstr2b/gstr3b/e invoice) each ship their
+# own same-named gst_merge_common.py with real content differences between
+# copies (see forms merger/README.md). Adding more than one of those
+# folders to sys.path at once would let the first-imported copy silently
+# shadow the others for the rest of the session. _use_merge_subfolder()
+# below adds exactly one at a time and clears the import cache around it.
+for _sub in ("ewb", "core"):
     _p = os.path.join(_HERE, _sub)
     if _p not in sys.path:
         sys.path.insert(0, _p)
+for _sub in ("extract_align/extractor", "extract_align/alligner"):
+    _p = os.path.join(_HERE, *_sub.split("/"))
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+_MERGE_ROOT = os.path.join(_HERE, "merge")
 
 
 def _read_bytes(path):
     with open(path, "rb") as f:
         return f.read()
+
+
+def _use_merge_subfolder(subfolder, module_name):
+    """
+    Make exactly one forms-merger subfolder importable, guaranteeing a
+    fresh import of both `module_name` and its sibling `gst_merge_common`
+    even if a different subfolder's copies of those same two module names
+    are still cached in sys.modules from an earlier call this session.
+    Returns the imported module.
+    """
+    for mod in ("gst_merge_common", module_name):
+        sys.modules.pop(mod, None)
+    for p in list(sys.path):
+        if p == _MERGE_ROOT or os.path.dirname(p) == _MERGE_ROOT:
+            sys.path.remove(p)
+    sys.path.insert(0, os.path.join(_MERGE_ROOT, subfolder))
+    return importlib.import_module(module_name)
 
 
 def process_ewb(inward_files, outward_files, work_dir):
@@ -101,3 +133,103 @@ def process_ewb(inward_files, outward_files, work_dir):
         return result
     finally:
         os.chdir(prev_cwd)
+
+
+# kind -> (subfolder under docs/py/merge, module name, output filename)
+MERGE_KINDS = {
+    "gstr1": ("gstr1", "merge_gstr1", "GSTR1_Merged.xlsx"),
+    "gstr2a": ("gstr2a", "merge_r2a", "R2A_Merged.xlsx"),
+    "gstr2b": ("gstr2b", "merge_gstr2b", "GSTR2B_Merged.xlsx"),
+    "gstr3b": ("gstr3b", "merge_gstr3b", "GSTR3B_Merged.xlsx"),
+    "einv": ("e invoice", "merge_einv", "EINV_Merged.xlsx"),
+}
+
+
+def process_merge(kind, files, work_dir):
+    """
+    Runs one of the 5 forms-merger scripts (gstr1/gstr2a/gstr2b/gstr3b/einv)
+    against a batch of uploaded per-period workbooks.
+
+    files: list of (filename, bytes) — the raw per-period .xlsx exports.
+    work_dir: an empty folder to do the work in (caller creates/cleans it).
+
+    Returns {"output_name": str, "output_bytes": bytes} or None if the
+    script found no files of its own type among what was uploaded (each
+    script detects its type by workbook content, not filename, so this can
+    happen even with files present if none of them actually match).
+    """
+    if kind not in MERGE_KINDS:
+        raise ValueError(f"unknown merge kind: {kind!r}")
+    subfolder, module_name, out_name = MERGE_KINDS[kind]
+    module = _use_merge_subfolder(subfolder, module_name)
+
+    os.makedirs(work_dir, exist_ok=True)
+    for name, data in files:
+        with open(os.path.join(work_dir, name), "wb") as f:
+            f.write(data)
+
+    prev_cwd = os.getcwd()
+    os.chdir(work_dir)
+    try:
+        module.main(".")
+        if not os.path.exists(out_name):
+            return None
+        return {"output_name": out_name, "output_bytes": _read_bytes(out_name)}
+    finally:
+        os.chdir(prev_cwd)
+
+
+def process_gstr3b(files, work_dir):
+    """
+    GSTR-3B's real pipeline is two steps: extract the Excel files bundled
+    inside each portal .zip download, then merge them. Accepts a mix of
+    GSTR3B_<GSTIN>_<MMYYYY>.zip bundles and/or already-extracted .xlsx
+    files (useful for local testing against fixtures either way).
+    """
+    import run as extractor_run  # extract_align/extractor/run.py
+
+    zip_dir = os.path.join(work_dir, "zips")
+    os.makedirs(zip_dir, exist_ok=True)
+    direct_xlsx = []
+    for name, data in files:
+        if name.lower().endswith(".zip"):
+            with open(os.path.join(zip_dir, name), "wb") as f:
+                f.write(data)
+        else:
+            direct_xlsx.append((name, data))
+
+    extractor_run.extract_excel_from_zips(zip_dir)
+    extracted_dir = os.path.join(zip_dir, extractor_run.DEST_FOLDER_NAME)
+    extracted = []
+    if os.path.isdir(extracted_dir):
+        for fname in os.listdir(extracted_dir):
+            extracted.append((fname, _read_bytes(os.path.join(extracted_dir, fname))))
+
+    all_xlsx = direct_xlsx + extracted
+    return process_merge("gstr3b", all_xlsx, os.path.join(work_dir, "merge"))
+
+
+def process_gstr2b(files, work_dir):
+    """
+    GSTR-2B's real pipeline is two steps: align every uploaded workbook to
+    the same set of worksheets (files out/alligner, mutates in place), then
+    merge (forms merger/gstr2b).
+    """
+    import complete_workbooks  # extract_align/alligner/complete_workbooks.py
+
+    os.makedirs(work_dir, exist_ok=True)
+    paths = []
+    for name, data in files:
+        p = os.path.join(work_dir, name)
+        with open(p, "wb") as f:
+            f.write(data)
+        paths.append(p)
+
+    master_order, reference_path = complete_workbooks.get_master_sheet_order(paths, None)
+    for p in paths:
+        complete_workbooks.complete_workbook(
+            p, master_order, reference_path, complete_workbooks.DEFAULT_COPY_SHEETS
+        )
+
+    aligned = [(os.path.basename(p), _read_bytes(p)) for p in paths]
+    return process_merge("gstr2b", aligned, os.path.join(work_dir, "merge"))

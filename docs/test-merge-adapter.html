@@ -1,0 +1,130 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>web_adapters.process_merge spike</title>
+<style>
+  body { font-family: monospace; font-size: 13px; padding: 20px; white-space: pre-wrap; background: #10141C; color: #E7EAF2; }
+  .ok { color: #79D19A; }
+  .fail { color: #EF9797; }
+  .step { color: #9BA3B7; }
+</style>
+</head>
+<body>
+<div id="log">Loading...\n</div>
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
+<script>
+const logEl = document.getElementById("log");
+function log(msg, cls) {
+  const span = document.createElement("span");
+  if (cls) span.className = cls;
+  span.textContent = msg + "\n";
+  logEl.appendChild(span);
+}
+
+const CASES = {
+  gstr1: ["GSTR1_05AAGCA2491N1ZG_012024_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_022024_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_032024_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_042023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_052023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_062023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_072023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_082023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_092023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_102023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_112023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_122023_Inv_1.xlsx"],
+  gstr2b: ["032024_05AAGCA2491N1ZG_GSTR2BQ_16062026.xlsx","062023_05AAGCA2491N1ZG_GSTR2BQ_16062026.xlsx","092023_05AAGCA2491N1ZG_GSTR2BQ_16062026.xlsx","122023_05AAGCA2491N1ZG_GSTR2BQ_16062026.xlsx"],
+  gstr3b: ["GSTR3B_05AAGCA2491N1ZG_012024.xlsx","GSTR3B_05AAGCA2491N1ZG_022024.xlsx","GSTR3B_05AAGCA2491N1ZG_032024.xlsx","GSTR3B_05AAGCA2491N1ZG_042023.xlsx","GSTR3B_05AAGCA2491N1ZG_052023.xlsx","GSTR3B_05AAGCA2491N1ZG_062023.xlsx","GSTR3B_05AAGCA2491N1ZG_072023.xlsx","GSTR3B_05AAGCA2491N1ZG_082023.xlsx","GSTR3B_05AAGCA2491N1ZG_092023.xlsx","GSTR3B_05AAGCA2491N1ZG_102023.xlsx","GSTR3B_05AAGCA2491N1ZG_112023.xlsx","GSTR3B_05AAGCA2491N1ZG_122023.xlsx","GSTR3B_Merged.xlsx"],
+  einv: ["EINV_05AAGCA2491N1ZG_2023-24 (1).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (10).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (11).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (2).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (3).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (4).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (5).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (6).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (7).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (8).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (9).xlsx","EINV_05AAGCA2491N1ZG_2023-24.xlsx","EINV_Merged.xlsx"],
+};
+// Deliberately run in a DIFFERENT order than declared above, and gstr2b
+// twice, to actually stress the gst_merge_common isolation fix rather than
+// just happening to work because of favorable ordering.
+const RUN_ORDER = ["gstr3b", "gstr1", "gstr2b", "einv", "gstr2b"];
+
+async function fetchAll(dir, names) {
+  const out = [];
+  for (const name of names) {
+    const resp = await fetch(`sample_data/${dir}/${encodeURIComponent(name)}`);
+    if (!resp.ok) throw new Error(`fetch failed for ${dir}/${name}: HTTP ${resp.status}`);
+    out.push([name, new Uint8Array(await resp.arrayBuffer())]);
+  }
+  return out;
+}
+
+async function vendorFile(pyodide, relPath) {
+  const r = await fetch(`py/${relPath}`);
+  if (!r.ok) throw new Error(`fetch failed for py/${relPath}: HTTP ${r.status}`);
+  const full = `/site/py/${relPath}`;
+  pyodide.FS.mkdirTree(full.substring(0, full.lastIndexOf("/")));
+  pyodide.FS.writeFile(full, await r.text());
+}
+
+async function main() {
+  logEl.textContent = "";
+  const t0 = performance.now();
+
+  log("STEP 1: loading Pyodide + openpyxl...", "step");
+  const pyodide = await loadPyodide();
+  await pyodide.loadPackage("micropip");
+  const micropip = pyodide.pyimport("micropip");
+  await micropip.install("openpyxl");
+  log(`  ok, ${((performance.now() - t0) / 1000).toFixed(1)}s`, "ok");
+
+  log("STEP 2: vendoring web_adapters.py + all 5 merge subfolders into the virtual FS...", "step");
+  await vendorFile(pyodide, "web_adapters.py");
+  for (const sub of ["gstr1", "gstr2a", "gstr2b", "gstr3b", "e invoice"]) {
+    for (const fname of ["gst_merge_common.py", sub === "e invoice" ? "merge_einv.py" : sub === "gstr2a" ? "merge_r2a.py" : `merge_${sub}.py`]) {
+      await vendorFile(pyodide, `merge/${sub}/${fname}`);
+    }
+  }
+  log("  ok", "ok");
+
+  log(`STEP 3: fetching real sample files for ${RUN_ORDER.length} runs (order: ${RUN_ORDER.join(", ")})...`, "step");
+  const fetched = {};
+  for (const kind of new Set(RUN_ORDER)) {
+    fetched[kind] = await fetchAll(kind, CASES[kind]);
+  }
+  log("  ok", "ok");
+
+  log("STEP 4: running process_merge() for each, in this exact order, in ONE Pyodide session...", "step");
+  pyodide.FS.mkdirTree("/work");
+  let allOk = true;
+  for (let i = 0; i < RUN_ORDER.length; i++) {
+    const kind = RUN_ORDER[i];
+    const workDir = `/work/run${i}_${kind}`;
+    pyodide.globals.set("_kind", kind);
+    pyodide.globals.set("_work_dir", workDir);
+    pyodide.globals.set("_files_py", pyodide.toPy(fetched[kind]));
+    const t1 = performance.now();
+    try {
+      const out = await pyodide.runPythonAsync(`
+import sys
+sys.path.insert(0, "/site/py")
+import web_adapters
+
+files = [(name, bytes(data)) for name, data in _files_py]
+result = web_adapters.process_merge(_kind, files, _work_dir)
+out_str = "NONE" if result is None else (result["output_name"] + " (" + str(len(result["output_bytes"])) + " bytes)")
+out_str
+`);
+      const dt = ((performance.now() - t1) / 1000).toFixed(1);
+      if (out === "NONE") {
+        log(`  [${i}] ${kind}: FAILED — process_merge returned None`, "fail");
+        allOk = false;
+      } else {
+        log(`  [${i}] ${kind} (${fetched[kind].length} files, ${dt}s) -> ${out}`, "ok");
+      }
+    } catch (err) {
+      log(`  [${i}] ${kind}: EXCEPTION — ${err.message}`, "fail");
+      allOk = false;
+    }
+  }
+
+  if (!allOk) throw new Error("one or more process_merge() runs failed — see above");
+
+  log(`\nALL ${RUN_ORDER.length} RUNS PASSED in ${((performance.now() - t0) / 1000).toFixed(1)}s total.`, "ok");
+  log("Confirms: no gst_merge_common cross-contamination across kinds or repeated calls in one session.", "ok");
+  document.title = "process_merge spike — PASSED";
+}
+
+main().catch(err => {
+  log(`\nFAILED: ${err.message}`, "fail");
+  log(err.stack || "", "fail");
+  document.title = "process_merge spike — FAILED";
+  console.error(err);
+});
+</script>
+</body>
+</html>

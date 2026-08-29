@@ -1,0 +1,603 @@
+"use strict";
+
+// ---------------------------------------------------------------------
+// Every merge/align/extract/convert call in this file runs the real,
+// unmodified scripts from the repo (vendored below) inside Pyodide —
+// nothing here is simulated. Uploaded files never leave this browser tab.
+// ---------------------------------------------------------------------
+
+const ICONS = {
+  upload: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V4M12 4 8 8M12 4l4 4"/><path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>',
+  file: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l4 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M14 3v4h4"/></svg>',
+  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
+  checkSm: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
+  warn: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.9 2.8 17a1.6 1.6 0 0 0 1.4 2.4h15.6a1.6 1.6 0 0 0 1.4-2.4L13.7 3.9a1.6 1.6 0 0 0-2.8 0Z"/></svg>',
+  lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="10" rx="1.5"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>',
+};
+
+// ---- section config -----------------------------------------------------
+const UPLOAD_SECTIONS = [
+  { id: "ewb_inward", step: 1, title: "Inward E-Way Bill", required: false, py: { kind: "ewb", direction: "inward" },
+    desc: "EWB MIS Report exports from the inward E-Way Bill portal folder.",
+    accept: "EWB_MIS_Report_Excel (N).xls", sampleDir: "inward" },
+  { id: "ewb_outward", step: 2, title: "Outward E-Way Bill", required: false, py: { kind: "ewb", direction: "outward" },
+    desc: "EWB MIS Report exports from the outward E-Way Bill portal folder.",
+    accept: "EWB_MIS_Report_Excel (N).xls", sampleDir: "outward" },
+  { id: "einv", step: 3, title: "E-Invoice", required: false, py: { kind: "merge", mergeKind: "einv" },
+    desc: "Monthly E-Invoice exports, any number of periods.",
+    accept: "per-period E-Invoice .xlsx", sampleDir: "einv" },
+  { id: "gstr1", step: 4, title: "GSTR-1", required: true, py: { kind: "merge", mergeKind: "gstr1" },
+    desc: "Monthly or quarterly GSTR-1 exports for the financial year.",
+    accept: "per-period GSTR-1 .xlsx", sampleDir: "gstr1" },
+  { id: "gstr2a", step: 5, title: "GSTR-2A", required: false, py: { kind: "merge", mergeKind: "gstr2a" },
+    desc: "Monthly GSTR-2A exports for the financial year.",
+    accept: "per-period GSTR-2A .xlsx", sampleDir: null,
+    note: "Not yet exercised against real GSTR-2A data in this build — the code path is identical to the other return types, just unverified. Report an issue if it misbehaves." },
+  { id: "gstr2b", step: 6, title: "GSTR-2B", required: false, py: { kind: "gstr2b" },
+    desc: "Monthly GSTR-2B exports — every workbook is aligned to the same set of worksheets before merging.",
+    accept: "per-period GSTR-2B .xlsx", sampleDir: "gstr2b_raw" },
+  { id: "gstr3b", step: 7, title: "GSTR-3B", required: true, py: { kind: "gstr3b" },
+    desc: "GSTR3B_&lt;GSTIN&gt;_&lt;MMYYYY&gt;.zip bundles straight from the portal (or already-extracted .xlsx files).",
+    accept: ".zip bundles or .xlsx", sampleDir: "gstr3b_zips" },
+];
+
+const LEDGER_SLOTS = [
+  { id: "cash", name: "Cash Ledger", ext: "CSV" },
+  { id: "credit", name: "Credit Ledger", ext: "CSV" },
+  { id: "liab1", name: "Liability Register — Part I", ext: "CSV" },
+  { id: "liab2", name: "Liability Ledger — Part II (DRC)", ext: "CSV" },
+  { id: "comparison", name: "Tax Liability & ITC Comparison", ext: "XLSX" },
+  { id: "table8a", name: "Table 8A", ext: "XLSX" },
+];
+const PDF_SLOTS = [
+  { id: "bo_profile", name: "BO / 360° Profile", ext: "PDF" },
+  { id: "gstr9", name: "GSTR-9 Annual Return", ext: "PDF" },
+  { id: "gstr9c", name: "GSTR-9C Reconciliation", ext: "PDF" },
+];
+const MASTER_SLOTS = [
+  { id: "hsn_master", name: "HSN / SAC Code Master", ext: "XLSX" },
+  { id: "blocked_itc", name: "Blocked-ITC Keyword Master", ext: "XLSX" },
+  { id: "machinery", name: "Machinery HSN Master", ext: "XLSX" },
+];
+const BSPL_ROWS = [
+  "Total Assets", "Total Equity & Liabilities", "Trade Receivables",
+  "Trade Payables", "Revenue from Operations", "Net Profit After Tax",
+];
+
+const RAIL_META = [
+  ...UPLOAD_SECTIONS.map(s => ({ id: s.id, step: s.step, title: s.title, required: s.required })),
+  { id: "ledgers", step: 8, title: "Ledgers & Portal Reports", required: false },
+  { id: "annual_pdfs", step: 9, title: "Annual PDF Reports", required: false },
+  { id: "masters", step: 10, title: "Reference Masters", required: false },
+  { id: "bs_pl", step: 11, title: "Balance Sheet / P&L", required: false },
+];
+const REQUIRED_IDS = RAIL_META.filter(s => s.required).map(s => s.id);
+const OPTIONAL_IDS = RAIL_META.filter(s => !s.required).map(s => s.id);
+
+// Everything collected so far, keyed by section id. Not yet consumed by
+// anything (main gst tool wiring is next) — this is where that will read
+// from once the "Run full scrutiny" button is wired up.
+const workbench = { done: new Set() };
+
+// ---------------------------------------------------------------------
+// Pyodide runtime
+// ---------------------------------------------------------------------
+let pyodide = null;
+let _callSeq = 0;
+
+const PY_FILES = [
+  "web_adapters.py",
+  "ewb/auto_ewb_merger.py",
+  "ewb/convert_ewb_files.py",
+  "merge/gstr1/gst_merge_common.py", "merge/gstr1/merge_gstr1.py",
+  "merge/gstr2a/gst_merge_common.py", "merge/gstr2a/merge_r2a.py",
+  "merge/gstr2b/gst_merge_common.py", "merge/gstr2b/merge_gstr2b.py",
+  "merge/gstr3b/gst_merge_common.py", "merge/gstr3b/merge_gstr3b.py",
+  "merge/e invoice/gst_merge_common.py", "merge/e invoice/merge_einv.py",
+  "extract_align/extractor/run.py",
+  "extract_align/alligner/complete_workbooks.py",
+];
+
+function setRuntimeState(state, text) {
+  const pill = document.getElementById("runtime-pill");
+  pill.dataset.state = state;
+  pill.innerHTML = `<span class="dot"></span>${text}`;
+  document.getElementById("rail-hint").textContent =
+    state === "ready"
+      ? "Only GSTR-1 and GSTR-3B are required. Everything else is optional and the final report will say plainly what was skipped."
+      : text;
+}
+
+async function initRuntime() {
+  try {
+    setRuntimeState("loading", "Starting Python runtime…");
+    pyodide = await loadPyodide();
+
+    setRuntimeState("loading", "Loading pandas, openpyxl, and friends…");
+    await pyodide.loadPackage(["pandas", "lxml", "html5lib", "xlrd"]);
+    await pyodide.loadPackage("micropip");
+    const micropip = pyodide.pyimport("micropip");
+    await micropip.install("openpyxl");
+
+    setRuntimeState("loading", "Loading the merge/align/extract scripts…");
+    for (const rel of PY_FILES) {
+      const resp = await fetch(`py/${rel}`);
+      if (!resp.ok) throw new Error(`failed to fetch py/${rel}: HTTP ${resp.status}`);
+      const full = `/site/py/${rel}`;
+      pyodide.FS.mkdirTree(full.substring(0, full.lastIndexOf("/")));
+      pyodide.FS.writeFile(full, await resp.text());
+    }
+    pyodide.FS.mkdirTree("/site/py/core");
+    pyodide.FS.mkdirTree("/work");
+    await pyodide.runPythonAsync(`
+import sys
+sys.path.insert(0, "/site/py")
+import web_adapters
+`);
+
+    setRuntimeState("ready", "Python runtime ready");
+    enableAllDropzones();
+  } catch (err) {
+    console.error(err);
+    setRuntimeState("error", "Runtime failed to load — reload the page");
+  }
+}
+
+async function runPy(code, globalsObj) {
+  for (const [k, v] of Object.entries(globalsObj || {})) {
+    const pyVal = pyodide.toPy(v);
+    pyodide.globals.set(k, pyVal);
+  }
+  const resultProxy = await pyodide.runPythonAsync(code);
+  if (resultProxy && typeof resultProxy.toJs === "function") {
+    const val = resultProxy.toJs({ dict_converter: Object.fromEntries });
+    resultProxy.destroy();
+    return val;
+  }
+  return resultProxy;
+}
+
+async function callEwb(direction, filePairs) {
+  const inward = direction === "inward" ? filePairs : [];
+  const outward = direction === "outward" ? filePairs : [];
+  const result = await runPy(`
+inward = [(n, bytes(d)) for n, d in _inward]
+outward = [(n, bytes(d)) for n, d in _outward]
+result = web_adapters.process_ewb(inward, outward, _work_dir)
+result["${direction}"]
+`, { _inward: inward, _outward: outward, _work_dir: `/work/ewb_${direction}_${++_callSeq}` });
+  return result;
+}
+
+async function callMerge(kind, filePairs) {
+  return await runPy(`
+files = [(n, bytes(d)) for n, d in _files]
+result = web_adapters.process_merge(_kind, files, _work_dir)
+result
+`, { _files: filePairs, _kind: kind, _work_dir: `/work/merge_${kind}_${++_callSeq}` });
+}
+
+async function callGstr3b(filePairs) {
+  return await runPy(`
+files = [(n, bytes(d)) for n, d in _files]
+result = web_adapters.process_gstr3b(files, _work_dir)
+result
+`, { _files: filePairs, _work_dir: `/work/gstr3b_${++_callSeq}` });
+}
+
+async function callGstr2b(filePairs) {
+  return await runPy(`
+files = [(n, bytes(d)) for n, d in _files]
+result = web_adapters.process_gstr2b(files, _work_dir)
+result
+`, { _files: filePairs, _work_dir: `/work/gstr2b_${++_callSeq}` });
+}
+
+// ---------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------
+const railList = document.getElementById("rail-list");
+railList.innerHTML = RAIL_META.map(s => `
+  <li class="rail-item" data-rail="${s.id}">
+    <a href="#sec-${s.id}">
+      <span class="rail-num">${String(s.step).padStart(2, "0")}</span>
+      <span class="rail-dot" data-dot="${s.id}"></span>
+      ${s.title}
+      ${s.required ? '<span class="req-mark">REQ</span>' : ""}
+    </a>
+  </li>`).join("");
+
+function uploadSectionHtml(cfg) {
+  return `
+  <section class="card" id="sec-${cfg.id}" data-section="${cfg.id}">
+    <div class="card-head">
+      <div class="card-head-left">
+        <div class="card-title-row">
+          <h2>${cfg.title}</h2>
+          <span class="tag ${cfg.required ? "required" : "optional"}">${cfg.required ? "Required" : "Optional"}</span>
+        </div>
+        <p class="card-desc">${cfg.desc}${cfg.note ? ` <em>${cfg.note}</em>` : ""}</p>
+      </div>
+      <span class="status-pill" data-status="${cfg.id}" data-state="empty"><span class="dot"></span>Waiting for runtime…</span>
+    </div>
+    <div class="card-body">
+      <div class="dropzone" data-dropzone="${cfg.id}" data-disabled="true" tabindex="0" role="button" aria-label="Upload files for ${cfg.title}">
+        <span class="dz-icon">${ICONS.upload}</span>
+        <span class="dz-text">
+          <strong>Drop files here, or click to choose</strong>
+          <span>${cfg.accept} &middot; multiple files</span>
+        </span>
+        <span class="dz-actions">
+          ${cfg.sampleDir ? `<button type="button" class="btn small ghost" data-sample="${cfg.id}" disabled>Try with sample data</button>` : ""}
+        </span>
+        <input type="file" data-input="${cfg.id}" multiple>
+      </div>
+      <div data-progress="${cfg.id}"></div>
+      <div data-result="${cfg.id}"></div>
+    </div>
+  </section>`;
+}
+
+function slotSectionHtml(id, title, desc, slots, opts) {
+  opts = opts || {};
+  return `
+  <section class="card" id="sec-${id}" data-section="${id}" ${opts.disabled ? 'data-disabled="true"' : ""}>
+    <div class="card-head">
+      <div class="card-head-left">
+        <div class="card-title-row">
+          <h2>${title}</h2>
+          <span class="tag ${opts.deferred ? "deferred" : "optional"}">${opts.deferred ? "Deferred" : "Optional"}</span>
+        </div>
+        <p class="card-desc">${desc}</p>
+      </div>
+      <span class="status-pill" data-status="${id}" data-state="empty"><span class="dot"></span>${opts.disabled ? "Not available" : `0 of ${slots.length}`}</span>
+    </div>
+    <div class="card-body">
+      <div class="slot-grid">
+        ${slots.map(sl => `
+          <div class="slot" data-slot="${id}:${sl.id}" ${opts.disabled ? "" : `tabindex="0" role="button"`} aria-label="Upload ${sl.name}">
+            <span class="slot-icon">${ICONS.file}</span>
+            <span>
+              <span class="slot-name">${sl.name}</span>
+              <span class="slot-sub"> &middot; ${sl.ext}</span>
+            </span>
+            <span class="slot-status">${opts.disabled ? "—" : "Empty"}</span>
+            ${opts.disabled ? "" : `<input type="file" data-slotinput="${id}:${sl.id}">`}
+          </div>`).join("")}
+      </div>
+      ${opts.persist ? `<p class="persist-note">${ICONS.lock} Saved in this browser — you won't need to re-upload these next time.</p>` : ""}
+      ${opts.footnote ? `<p class="card-desc" style="margin-top:12px;">${opts.footnote}</p>` : ""}
+    </div>
+  </section>`;
+}
+
+function bsplSectionHtml() {
+  return `
+  <section class="card" id="sec-bs_pl" data-section="bs_pl">
+    <div class="card-head">
+      <div class="card-head-left">
+        <div class="card-title-row">
+          <h2>Balance Sheet / P&amp;L</h2>
+          <span class="tag optional">Optional</span>
+        </div>
+        <p class="card-desc">Typed in, not uploaded — the tool never OCRs a scanned balance sheet. Figures cross-check against the return data.</p>
+      </div>
+      <span class="status-pill" data-status="bs_pl" data-state="empty"><span class="dot"></span>Not started</span>
+    </div>
+    <div class="card-body">
+      <p class="bspl-tag">Tagged to <span class="mono" id="bspl-gstin-tag">—</span> — will be refused automatically if it doesn't match the GSTIN above, once the scrutiny engine is wired up.</p>
+      <div class="bspl-grid" id="bspl-grid">
+        <div class="head">Line item</div><div class="head" style="text-align:right;">FY prior</div><div class="head" style="text-align:right;">FY current</div>
+        ${BSPL_ROWS.map((label, i) => `
+          <div class="label">${label}</div>
+          <div><input class="mono" data-bspl="${i}-prior" type="text" inputmode="decimal" placeholder="—"></div>
+          <div><input class="mono" data-bspl="${i}-current" type="text" inputmode="decimal" placeholder="—"></div>`).join("")}
+      </div>
+      <p class="bspl-more">+ 10 more line items in the full form (reserves, provisions, finance costs, depreciation, and more).</p>
+    </div>
+  </section>`;
+}
+
+const pipeline = document.getElementById("pipeline");
+pipeline.innerHTML =
+  UPLOAD_SECTIONS.map(uploadSectionHtml).join("") +
+  slotSectionHtml("ledgers", "Ledgers &amp; Portal Reports",
+    "Straight portal exports — no conversion needed, stored as-is.", LEDGER_SLOTS) +
+  slotSectionHtml("annual_pdfs", "Annual PDF Reports",
+    "PDF exports from the portal, normally converted to structured Excel automatically.",
+    PDF_SLOTS, {
+      disabled: true, deferred: true,
+      footnote: "Deferred: the PDF library this needs (pdfplumber) depends on a component with no WebAssembly build, so it can't run in the browser yet. Confirmed by testing directly — not an assumption. These 3 inputs are optional, so the rest of the tool works without them.",
+    }) +
+  slotSectionHtml("masters", "Reference Masters",
+    "Your organisation's own reference lists — upload once, reused on every filing.",
+    MASTER_SLOTS, { persist: true }) +
+  bsplSectionHtml();
+
+// ---------------------------------------------------------------------
+// Shared status/workbench helpers
+// ---------------------------------------------------------------------
+function setStatus(id, state, text) {
+  const pill = document.querySelector(`[data-status="${id}"]`);
+  if (!pill) return;
+  pill.dataset.state = state;
+  pill.innerHTML = `<span class="dot"></span>${text}`;
+  const dot = document.querySelector(`[data-dot="${id}"]`);
+  if (dot) dot.dataset.state = state;
+}
+
+function markDone(id) { workbench.done.add(id); updateRunbar(); }
+function markUndone(id) { workbench.done.delete(id); updateRunbar(); }
+
+function updateRunbar() {
+  const reqDone = REQUIRED_IDS.filter(id => workbench.done.has(id)).length;
+  const optDone = OPTIONAL_IDS.filter(id => workbench.done.has(id)).length;
+  document.getElementById("req-status").innerHTML = `Required: <span class="mono">${reqDone}/${REQUIRED_IDS.length}</span> ready`;
+  document.getElementById("req-status").classList.toggle("ok", reqDone === REQUIRED_IDS.length);
+  document.getElementById("opt-status").textContent = `${optDone}/${OPTIONAL_IDS.length}`;
+  document.getElementById("opt-bar").style.width = `${(optDone / OPTIONAL_IDS.length) * 100}%`;
+  // Run button stays disabled — main gst tool wiring isn't built yet.
+  // (Deliberately not gated on reqDone: enabling it would imply it works.)
+}
+
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => t.classList.remove("show"), 3200);
+}
+
+function enableAllDropzones() {
+  document.querySelectorAll(".dropzone[data-disabled]").forEach(dz => {
+    if (dz.closest('[data-disabled="true"]')) return; // deferred sections stay off
+    dz.removeAttribute("data-disabled");
+  });
+  document.querySelectorAll("[data-sample]").forEach(btn => { btn.disabled = false; });
+  UPLOAD_SECTIONS.forEach(cfg => setStatus(cfg.id, "empty", "Not started"));
+}
+
+async function fileToBytes(file) {
+  return new Uint8Array(await file.arrayBuffer());
+}
+async function filesToPairs(fileList) {
+  const out = [];
+  for (const f of fileList) out.push([f.name, await fileToBytes(f)]);
+  return out;
+}
+async function fetchSample(dir, names) {
+  const out = [];
+  for (const name of names) {
+    const resp = await fetch(`sample_data/${dir}/${encodeURIComponent(name)}`);
+    if (!resp.ok) throw new Error(`sample fetch failed for ${dir}/${name}: HTTP ${resp.status}`);
+    out.push([name, new Uint8Array(await resp.arrayBuffer())]);
+  }
+  return out;
+}
+async function listSampleDir(dir) {
+  // No directory-listing endpoint on a plain static server — sample sets
+  // are declared per section below instead of discovered.
+  return SAMPLE_MANIFEST[dir] || [];
+}
+const SAMPLE_MANIFEST = {
+  inward: ["EWB_MIS_Report_Excel (1).xls","EWB_MIS_Report_Excel (2).xls","EWB_MIS_Report_Excel (3).xls","EWB_MIS_Report_Excel (4).xls","EWB_MIS_Report_Excel (5).xls","EWB_MIS_Report_Excel (6).xls","EWB_MIS_Report_Excel (7).xls","EWB_MIS_Report_Excel (8).xls","EWB_MIS_Report_Excel (9).xls","EWB_MIS_Report_Excel (10).xls","EWB_MIS_Report_Excel (11).xls","EWB_MIS_Report_Excel (12).xls","EWB_MIS_Report_Excel (13).xls","EWB_MIS_Report_Excel (14).xls"],
+  outward: ["EWB_MIS_Report_Excel.xls","EWB_MIS_Report_Excel (1).xls","EWB_MIS_Report_Excel (2).xls","EWB_MIS_Report_Excel (3).xls","EWB_MIS_Report_Excel (4).xls","EWB_MIS_Report_Excel (5).xls","EWB_MIS_Report_Excel (6).xls","EWB_MIS_Report_Excel (7).xls","EWB_MIS_Report_Excel (8).xls","EWB_MIS_Report_Excel (9).xls","EWB_MIS_Report_Excel (10).xls","EWB_MIS_Report_Excel (11).xls","EWB_MIS_Report_Excel (12).xls","EWB_MIS_Report_Excel (13).xls","EWB_MIS_Report_Excel (64).xls","EWB_MIS_Report_Excel (65).xls","EWB_MIS_Report_Excel (66).xls","EWB_MIS_Report_Excel (67).xls","EWB_MIS_Report_Excel (68).xls"],
+  gstr1: ["GSTR1_05AAGCA2491N1ZG_012024_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_022024_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_032024_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_042023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_052023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_062023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_072023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_082023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_092023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_102023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_112023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_122023_Inv_1.xlsx"],
+  einv: ["EINV_05AAGCA2491N1ZG_2023-24.xlsx","EINV_05AAGCA2491N1ZG_2023-24 (1).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (2).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (3).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (4).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (5).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (6).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (7).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (8).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (9).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (10).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (11).xlsx"],
+  gstr2b_raw: ["042025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","052025_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","062025_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","072025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","082025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","092025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","102025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","112025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","122025_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","012026_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","022026_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","032026_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx"],
+  gstr3b_zips: ["GSTR3B_05AAECM6380J1ZA_042022.zip","GSTR3B_05AAECM6380J1ZA_052022.zip","GSTR3B_05AAECM6380J1ZA_062022.zip","GSTR3B_05AAECM6380J1ZA_072022.zip","GSTR3B_05AAECM6380J1ZA_082022.zip","GSTR3B_05AAECM6380J1ZA_092022.zip","GSTR3B_05AAECM6380J1ZA_102022.zip","GSTR3B_05AAECM6380J1ZA_112022.zip","GSTR3B_05AAECM6380J1ZA_122022.zip","GSTR3B_05AAECM6380J1ZA_012023.zip","GSTR3B_05AAECM6380J1ZA_022023.zip","GSTR3B_05AAECM6380J1ZA_032023.zip"],
+};
+
+// ---------------------------------------------------------------------
+// Upload sections — real processing
+// ---------------------------------------------------------------------
+function showError(cfg, message) {
+  setStatus(cfg.id, "error", "Failed");
+  document.querySelector(`[data-result="${cfg.id}"]`).innerHTML = `
+    <div class="result-line error">
+      ${ICONS.warn}
+      <p>${message}</p>
+    </div>`;
+  markUndone(cfg.id);
+}
+
+function showResult(cfg, r, extraLine) {
+  if (!r) {
+    showError(cfg, `No ${cfg.title}-shaped files were detected among what you uploaded. Double-check these are the right export type.`);
+    return;
+  }
+  setStatus(cfg.id, "ready", "Ready");
+  const kb = (r.output_bytes.length / 1024).toFixed(0);
+  document.querySelector(`[data-result="${cfg.id}"]`).innerHTML = `
+    <div class="result-line">
+      ${ICONS.check}
+      <p>${extraLine ? extraLine + "<br>" : ""}<span class="out-file">→ ${r.output_name}</span> (${kb} KB)</p>
+    </div>`;
+  workbench[cfg.id] = r;
+  markDone(cfg.id);
+}
+
+async function processSection(cfg, filePairs) {
+  if (!pyodide) return;
+  setStatus(cfg.id, "processing", "Processing…");
+  document.querySelector(`[data-result="${cfg.id}"]`).innerHTML = "";
+  const progWrap = document.querySelector(`[data-progress="${cfg.id}"]`);
+  progWrap.innerHTML = `<div class="progress-wrap"><div class="progress-track"><div class="progress-fill" data-fill></div></div><div class="progress-label">Running the real merge script on ${filePairs.length} file${filePairs.length === 1 ? "" : "s"}…</div></div>`;
+  requestAnimationFrame(() => { const f = progWrap.querySelector("[data-fill]"); if (f) f.style.width = "100%"; });
+
+  try {
+    let result, extraLine;
+    if (cfg.py.kind === "ewb") {
+      result = await callEwb(cfg.py.direction, filePairs);
+      extraLine = result ? `${result.rows} rows merged` : null;
+    } else if (cfg.py.kind === "merge") {
+      result = await callMerge(cfg.py.mergeKind, filePairs);
+    } else if (cfg.py.kind === "gstr2b") {
+      result = await callGstr2b(filePairs);
+    } else if (cfg.py.kind === "gstr3b") {
+      result = await callGstr3b(filePairs);
+    }
+    progWrap.innerHTML = "";
+    showResult(cfg, result, extraLine);
+  } catch (err) {
+    console.error(err);
+    progWrap.innerHTML = "";
+    showError(cfg, `Error while processing: ${String(err.message || err).slice(0, 200)}`);
+  }
+}
+
+UPLOAD_SECTIONS.forEach(cfg => {
+  const dz = document.querySelector(`[data-dropzone="${cfg.id}"]`);
+  const input = document.querySelector(`[data-input="${cfg.id}"]`);
+  const sampleBtn = document.querySelector(`[data-sample="${cfg.id}"]`);
+
+  function guarded(fn) {
+    return (...args) => { if (dz.dataset.disabled === "true") return; fn(...args); };
+  }
+
+  dz.addEventListener("click", guarded(e => { if (e.target !== sampleBtn) input.click(); }));
+  dz.addEventListener("keydown", guarded(e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); } }));
+  ["dragenter", "dragover"].forEach(ev => dz.addEventListener(ev, guarded(e => { e.preventDefault(); dz.classList.add("drag"); })));
+  ["dragleave", "drop"].forEach(ev => dz.addEventListener(ev, guarded(e => { e.preventDefault(); dz.classList.remove("drag"); })));
+  dz.addEventListener("drop", guarded(async e => {
+    const files = e.dataTransfer.files;
+    if (files && files.length) processSection(cfg, await filesToPairs(files));
+  }));
+  input.addEventListener("change", async () => {
+    if (input.files && input.files.length) await processSection(cfg, await filesToPairs(input.files));
+    input.value = "";
+  });
+  if (sampleBtn) {
+    sampleBtn.addEventListener("click", async e => {
+      e.stopPropagation();
+      if (sampleBtn.disabled) return;
+      try {
+        const names = await listSampleDir(cfg.sampleDir);
+        const pairs = await fetchSample(cfg.sampleDir, names);
+        await processSection(cfg, pairs);
+      } catch (err) {
+        toast(`Couldn't load sample data: ${err.message}`);
+      }
+    });
+  }
+});
+
+// ---------------------------------------------------------------------
+// Ledgers / masters — real byte capture, no processing needed
+// ---------------------------------------------------------------------
+function wireSlotSection(sectionId, slots, opts) {
+  opts = opts || {};
+  const doneSlots = new Set();
+  slots.forEach(sl => {
+    const key = `${sectionId}:${sl.id}`;
+    const el = document.querySelector(`[data-slot="${key}"]`);
+    const input = document.querySelector(`[data-slotinput="${key}"]`);
+    if (!el || !input) return;
+
+    async function complete(file) {
+      const bytes = await fileToBytes(file);
+      workbench[key] = { name: file.name, bytes };
+      doneSlots.add(sl.id);
+      el.dataset.done = "true";
+      el.querySelector(".slot-icon").innerHTML = ICONS.checkSm;
+      el.querySelector(".slot-status").textContent = file.name.length > 22 ? file.name.slice(0, 20) + "…" : file.name;
+      setStatus(sectionId, doneSlots.size === slots.length ? "ready" : "processing", `${doneSlots.size} of ${slots.length}`);
+      if (doneSlots.size > 0) markDone(sectionId);
+      if (opts.persist) persistMaster(sl.id, file.name, bytes);
+    }
+
+    el.addEventListener("click", () => input.click());
+    el.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); } });
+    input.addEventListener("change", () => { if (input.files[0]) complete(input.files[0]); });
+  });
+  return { restore: (slotId, name, bytes) => {
+    const el = document.querySelector(`[data-slot="${sectionId}:${slotId}"]`);
+    if (!el) return;
+    workbench[`${sectionId}:${slotId}`] = { name, bytes };
+    doneSlots.add(slotId);
+    el.dataset.done = "true";
+    el.querySelector(".slot-icon").innerHTML = ICONS.checkSm;
+    el.querySelector(".slot-status").textContent = name.length > 22 ? name.slice(0, 20) + "…" : name;
+    setStatus(sectionId, doneSlots.size === slots.length ? "ready" : "processing", `${doneSlots.size} of ${slots.length}`);
+    if (doneSlots.size > 0) markDone(sectionId);
+  }};
+}
+wireSlotSection("ledgers", LEDGER_SLOTS);
+const mastersHandle = wireSlotSection("masters", MASTER_SLOTS, { persist: true });
+
+// Reference masters persist across visits — this is genuinely per-viewer
+// browser storage, not shared with anyone; wrapped defensively since
+// localStorage can throw (private browsing, quota, disabled storage).
+const MASTER_STORAGE_KEY = "scrutiny-desk:masters:v1";
+function persistMaster(slotId, name, bytes) {
+  try {
+    const store = JSON.parse(localStorage.getItem(MASTER_STORAGE_KEY) || "{}");
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    store[slotId] = { name, b64: btoa(binary) };
+    localStorage.setItem(MASTER_STORAGE_KEY, JSON.stringify(store));
+  } catch (err) {
+    console.warn("could not persist master file locally", err);
+  }
+}
+function loadPersistedMasters() {
+  try {
+    const store = JSON.parse(localStorage.getItem(MASTER_STORAGE_KEY) || "{}");
+    for (const [slotId, { name, b64 }] of Object.entries(store)) {
+      const binary = atob(b64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      mastersHandle.restore(slotId, name, bytes);
+    }
+  } catch (err) {
+    console.warn("could not restore saved master files", err);
+  }
+}
+loadPersistedMasters();
+
+// ---------------------------------------------------------------------
+// BS/PL form
+// ---------------------------------------------------------------------
+document.getElementById("bspl-grid").addEventListener("input", () => {
+  const inputs = Array.from(document.querySelectorAll("[data-bspl]"));
+  const anyFilled = inputs.some(i => i.value.trim() !== "");
+  setStatus("bs_pl", anyFilled ? "ready" : "empty", anyFilled ? "Ready" : "Not started");
+  if (anyFilled) {
+    const data = {};
+    BSPL_ROWS.forEach((label, i) => {
+      const prior = document.querySelector(`[data-bspl="${i}-prior"]`).value.trim();
+      const current = document.querySelector(`[data-bspl="${i}-current"]`).value.trim();
+      if (prior || current) data[label] = { fy_prior: prior || null, fy_current: current || null };
+    });
+    workbench.bs_pl = data;
+    markDone("bs_pl");
+  } else {
+    delete workbench.bs_pl;
+    markUndone("bs_pl");
+  }
+});
+
+const gstinField = document.getElementById("gstin-field");
+const fyField = document.getElementById("fy-field");
+gstinField.addEventListener("input", () => {
+  document.getElementById("bspl-gstin-tag").textContent = gstinField.value || "—";
+});
+
+// ---------------------------------------------------------------------
+// Scroll-spy
+// ---------------------------------------------------------------------
+const sections = Array.from(document.querySelectorAll("[data-section]"));
+const railItems = Array.from(document.querySelectorAll(".rail-item"));
+const spy = new IntersectionObserver(entries => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      const id = entry.target.dataset.section;
+      railItems.forEach(li => li.classList.toggle("active", li.dataset.rail === id));
+    }
+  });
+}, { rootMargin: "-15% 0px -70% 0px" });
+sections.forEach(s => spy.observe(s));
+
+// ---------------------------------------------------------------------
+updateRunbar();
+initRuntime();
