@@ -21,6 +21,19 @@ const PY_FILES = [
   "merge/e invoice/gst_merge_common.py", "merge/e invoice/merge_einv.py",
   "extract_align/extractor/run.py",
   "extract_align/alligner/complete_workbooks.py",
+  "core/bs_pl_input.py",
+  "core/gst_blocked_credit.py",
+  "core/gst_checks_flow.py",
+  "core/gst_checks_forensic.py",
+  "core/gst_checks_hsn_fraud.py",
+  "core/gst_checks_monthly.py",
+  "core/gst_config.py",
+  "core/gst_core.py",
+  "core/gst_machinery_scan.py",
+  "core/gst_parsers_dept.py",
+  "core/gst_parsers_returns.py",
+  "core/gst_report.py",
+  "core/master_build.py",
 ];
 
 function post(msg) { postMessage(msg); }
@@ -108,6 +121,16 @@ result
 `, { _files: filePairs, _work_dir: `/work/gstr2b_${++_callSeq}` });
 }
 
+async function callFullScrutiny(filePairs, bsPlData) {
+  // runPy() already runs every value through pyodide.toPy(), so _bs_pl
+  // arrives as a real Python dict (or None) — no further conversion needed.
+  return await runPy(`
+files = [(n, bytes(d)) for n, d in _files]
+result = web_adapters.process_full_scrutiny(files, _bs_pl, _work_dir)
+result
+`, { _files: filePairs, _bs_pl: bsPlData || null, _work_dir: `/work/full_${++_callSeq}` });
+}
+
 onmessage = async (e) => {
   const msg = e.data;
   if (msg.type !== "call") return;
@@ -121,6 +144,7 @@ onmessage = async (e) => {
     else if (msg.adapter === "merge") result = await callMerge(msg.args.mergeKind, msg.args.filePairs);
     else if (msg.adapter === "gstr2b") result = await callGstr2b(msg.args.filePairs);
     else if (msg.adapter === "gstr3b") result = await callGstr3b(msg.args.filePairs);
+    else if (msg.adapter === "full_scrutiny") result = await callFullScrutiny(msg.args.filePairs, msg.args.bsPlData);
     else throw new Error(`unknown adapter: ${msg.adapter}`);
     post({ type: "result", id: msg.id, ok: true, result });
   } catch (err) {

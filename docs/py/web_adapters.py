@@ -233,3 +233,82 @@ def process_gstr2b(files, work_dir):
 
     aligned = [(os.path.basename(p), _read_bytes(p)) for p in paths]
     return process_merge("gstr2b", aligned, os.path.join(work_dir, "merge"))
+
+
+def _render_bs_pl_module(bs_pl_data):
+    """
+    master_build.py does a plain `import bs_pl_input` and reads its
+    BS_PL_DATA module attribute (see main gst tool/bs_pl_input.py's own
+    docstring) — there's no function call to hand data to directly. This
+    renders a real bs_pl_input.py source file from the dict the browser's
+    form collected, so that import picks it up. bs_pl_data values must
+    already be numbers/None, not strings — the caller (app.js) is
+    responsible for parsing the form's text inputs first.
+    """
+    import json
+
+    lines = ["BS_PL_DATA = " + json.dumps(bs_pl_data, indent=4)]
+    # JSON has no None-as-bare-identifier issue (json.dumps already emits
+    # `null`), but Python needs `None`, not `null` — swap it back.
+    return "\n".join(lines).replace("null", "None") + "\n"
+
+
+def process_full_scrutiny(files, bs_pl_data, work_dir):
+    """
+    The final step: assemble every merged/collected file into one folder
+    and run master_build.py's actual scrutiny engine against it, exactly
+    as the CLI tool would if you dropped these files in a folder yourself.
+
+    files: list of (filename, bytes) — every *_Merged.xlsx / annual EWB /
+        ledger CSV / portal export / reference master collected so far.
+        Only GSTR-1 and GSTR-3B are genuinely mandatory; master_build.py
+        itself raises a clear RuntimeError naming what's missing if not.
+    bs_pl_data: dict shaped like BS_PL_DATA (see bs_pl_input.py), or None/
+        empty to skip the Balance Sheet/P&L checks (R0-R12) entirely.
+    work_dir: an empty folder to do the work in (caller creates/cleans it).
+
+    Returns {"output_name": str, "output_bytes": bytes, "log": str} — log
+    is everything master_build.main() printed, for an honest run summary
+    (months covered, finding counts, etc.) in the UI, not a fabricated one.
+    Raises whatever master_build.main() raises (e.g. missing mandatory
+    inputs) — the caller should catch and surface that message as-is, since
+    it's already written to be a clear, actionable explanation.
+    """
+    import contextlib
+    import io
+
+    os.makedirs(work_dir, exist_ok=True)
+    for name, data in files:
+        with open(os.path.join(work_dir, name), "wb") as f:
+            f.write(data)
+
+    core_dir = os.path.join(_HERE, "core")
+    bs_pl_path = os.path.join(core_dir, "bs_pl_input.py")
+    sys.modules.pop("bs_pl_input", None)
+    sys.modules.pop("master_build", None)
+    if bs_pl_data:
+        with open(bs_pl_path, "w") as f:
+            f.write(_render_bs_pl_module(bs_pl_data))
+    elif not os.path.exists(bs_pl_path):
+        # No form data supplied and no template present in this vendored
+        # copy: write an empty one so `import bs_pl_input` still succeeds
+        # (master_build.py handles an empty/missing BS_PL_DATA gracefully —
+        # it just skips R0-R12 — but the import itself must not fail).
+        with open(bs_pl_path, "w") as f:
+            f.write("BS_PL_DATA = {}\n")
+
+    import master_build
+
+    prev_cwd = os.getcwd()
+    os.chdir(work_dir)
+    log_buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(log_buf):
+            outfile = master_build.main(".")
+        return {
+            "output_name": outfile,
+            "output_bytes": _read_bytes(outfile),
+            "log": log_buf.getvalue(),
+        }
+    finally:
+        os.chdir(prev_cwd)

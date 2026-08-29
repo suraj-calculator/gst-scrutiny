@@ -38,7 +38,7 @@ const UPLOAD_SECTIONS = [
     accept: "per-period GSTR-2B .xlsx", sampleDir: "gstr2b_raw" },
   { id: "gstr3b", step: 7, title: "GSTR-3B", required: true, py: { kind: "gstr3b" },
     desc: "GSTR3B_&lt;GSTIN&gt;_&lt;MMYYYY&gt;.zip bundles straight from the portal (or already-extracted .xlsx files).",
-    accept: ".zip bundles or .xlsx", sampleDir: "gstr3b_zips" },
+    accept: ".zip bundles or .xlsx", sampleDir: "gstr3b" },
 ];
 
 const LEDGER_SLOTS = [
@@ -59,9 +59,16 @@ const MASTER_SLOTS = [
   { id: "blocked_itc", name: "Blocked-ITC Keyword Master", ext: "XLSX" },
   { id: "machinery", name: "Machinery HSN Master", ext: "XLSX" },
 ];
+// label -> the real BS_PL_DATA dict key from bs_pl_input.py (see
+// "main gst tool/bs_pl_input.py"), so form values assemble into exactly
+// the shape master_build.py already knows how to consume.
 const BSPL_ROWS = [
-  "Total Assets", "Total Equity & Liabilities", "Trade Receivables",
-  "Trade Payables", "Revenue from Operations", "Net Profit After Tax",
+  { label: "Total Assets", key: "total_assets" },
+  { label: "Total Equity & Liabilities", key: "total_equity_liab" },
+  { label: "Trade Receivables", key: "trade_receivables" },
+  { label: "Trade Payables", key: "trade_payables" },
+  { label: "Revenue from Operations", key: "revenue_from_operations" },
+  { label: "Net Profit After Tax", key: "net_profit_after_tax" },
 ];
 
 const RAIL_META = [
@@ -110,6 +117,7 @@ function initRuntime() {
       if (msg.state === "ready") {
         workerReady = true;
         enableAllDropzones();
+        updateRunbar();
       }
     } else if (msg.type === "result") {
       const pending = pendingCalls.get(msg.id);
@@ -144,6 +152,9 @@ async function callGstr3b(filePairs) {
 }
 async function callGstr2b(filePairs) {
   return await callWorker("gstr2b", { filePairs });
+}
+async function callFullScrutiny(filePairs, bsPlData) {
+  return await callWorker("full_scrutiny", { filePairs, bsPlData });
 }
 
 // ---------------------------------------------------------------------
@@ -238,13 +249,13 @@ function bsplSectionHtml() {
       <span class="status-pill" data-status="bs_pl" data-state="empty"><span class="dot"></span>Not started</span>
     </div>
     <div class="card-body">
-      <p class="bspl-tag">Tagged to <span class="mono" id="bspl-gstin-tag">—</span> — will be refused automatically if it doesn't match the GSTIN above, once the scrutiny engine is wired up.</p>
+      <p class="bspl-tag">Tagged to <span class="mono" id="bspl-gstin-tag">—</span> — refused automatically by master_build.py if it doesn't match the GSTIN being processed.</p>
       <div class="bspl-grid" id="bspl-grid">
         <div class="head">Line item</div><div class="head" style="text-align:right;">FY prior</div><div class="head" style="text-align:right;">FY current</div>
-        ${BSPL_ROWS.map((label, i) => `
-          <div class="label">${label}</div>
-          <div><input class="mono" data-bspl="${i}-prior" type="text" inputmode="decimal" placeholder="—"></div>
-          <div><input class="mono" data-bspl="${i}-current" type="text" inputmode="decimal" placeholder="—"></div>`).join("")}
+        ${BSPL_ROWS.map(row => `
+          <div class="label">${row.label}</div>
+          <div><input class="mono" data-bspl="${row.key}-prior" type="text" inputmode="decimal" placeholder="—"></div>
+          <div><input class="mono" data-bspl="${row.key}-current" type="text" inputmode="decimal" placeholder="—"></div>`).join("")}
       </div>
       <p class="bspl-more">+ 10 more line items in the full form (reserves, provisions, finance costs, depreciation, and more).</p>
     </div>
@@ -289,8 +300,10 @@ function updateRunbar() {
   document.getElementById("req-status").classList.toggle("ok", reqDone === REQUIRED_IDS.length);
   document.getElementById("opt-status").textContent = `${optDone}/${OPTIONAL_IDS.length}`;
   document.getElementById("opt-bar").style.width = `${(optDone / OPTIONAL_IDS.length) * 100}%`;
-  // Run button stays disabled — main gst tool wiring isn't built yet.
-  // (Deliberately not gated on reqDone: enabling it would imply it works.)
+  const btn = document.getElementById("run-btn");
+  const canRun = workerReady && reqDone === REQUIRED_IDS.length;
+  btn.disabled = !canRun;
+  btn.title = canRun ? "" : "Needs GSTR-1 and GSTR-3B ready, and the Python runtime loaded";
 }
 
 function toast(msg) {
@@ -302,8 +315,11 @@ function toast(msg) {
 }
 
 function enableAllDropzones() {
+  // Every upload section's dropzone starts with its own data-disabled="true"
+  // marker (cleared here once the runtime is ready). Deferred sections
+  // (Annual PDF Reports) use .slot elements, not .dropzone, so they're
+  // never matched by this selector and stay off on their own.
   document.querySelectorAll(".dropzone[data-disabled]").forEach(dz => {
-    if (dz.closest('[data-disabled="true"]')) return; // deferred sections stay off
     dz.removeAttribute("data-disabled");
   });
   document.querySelectorAll("[data-sample]").forEach(btn => { btn.disabled = false; });
@@ -338,7 +354,7 @@ const SAMPLE_MANIFEST = {
   gstr1: ["GSTR1_05AAGCA2491N1ZG_012024_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_022024_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_032024_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_042023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_052023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_062023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_072023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_082023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_092023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_102023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_112023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_122023_Inv_1.xlsx"],
   einv: ["EINV_05AAGCA2491N1ZG_2023-24.xlsx","EINV_05AAGCA2491N1ZG_2023-24 (1).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (2).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (3).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (4).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (5).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (6).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (7).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (8).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (9).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (10).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (11).xlsx"],
   gstr2b_raw: ["042025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","052025_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","062025_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","072025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","082025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","092025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","102025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","112025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","122025_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","012026_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","022026_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","032026_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx"],
-  gstr3b_zips: ["GSTR3B_05AAECM6380J1ZA_042022.zip","GSTR3B_05AAECM6380J1ZA_052022.zip","GSTR3B_05AAECM6380J1ZA_062022.zip","GSTR3B_05AAECM6380J1ZA_072022.zip","GSTR3B_05AAECM6380J1ZA_082022.zip","GSTR3B_05AAECM6380J1ZA_092022.zip","GSTR3B_05AAECM6380J1ZA_102022.zip","GSTR3B_05AAECM6380J1ZA_112022.zip","GSTR3B_05AAECM6380J1ZA_122022.zip","GSTR3B_05AAECM6380J1ZA_012023.zip","GSTR3B_05AAECM6380J1ZA_022023.zip","GSTR3B_05AAECM6380J1ZA_032023.zip"],
+  gstr3b: ["GSTR3B_05AAGCA2491N1ZG_042023.xlsx","GSTR3B_05AAGCA2491N1ZG_052023.xlsx","GSTR3B_05AAGCA2491N1ZG_062023.xlsx","GSTR3B_05AAGCA2491N1ZG_072023.xlsx","GSTR3B_05AAGCA2491N1ZG_082023.xlsx","GSTR3B_05AAGCA2491N1ZG_092023.xlsx","GSTR3B_05AAGCA2491N1ZG_102023.xlsx","GSTR3B_05AAGCA2491N1ZG_112023.xlsx","GSTR3B_05AAGCA2491N1ZG_122023.xlsx","GSTR3B_05AAGCA2491N1ZG_012024.xlsx","GSTR3B_05AAGCA2491N1ZG_022024.xlsx","GSTR3B_05AAGCA2491N1ZG_032024.xlsx"],
 };
 
 // ---------------------------------------------------------------------
@@ -511,16 +527,26 @@ loadPersistedMasters();
 // ---------------------------------------------------------------------
 // BS/PL form
 // ---------------------------------------------------------------------
+function parseBsplNumber(raw) {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const n = Number(trimmed.replace(/,/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+
 document.getElementById("bspl-grid").addEventListener("input", () => {
   const inputs = Array.from(document.querySelectorAll("[data-bspl]"));
   const anyFilled = inputs.some(i => i.value.trim() !== "");
   setStatus("bs_pl", anyFilled ? "ready" : "empty", anyFilled ? "Ready" : "Not started");
   if (anyFilled) {
-    const data = {};
-    BSPL_ROWS.forEach((label, i) => {
-      const prior = document.querySelector(`[data-bspl="${i}-prior"]`).value.trim();
-      const current = document.querySelector(`[data-bspl="${i}-current"]`).value.trim();
-      if (prior || current) data[label] = { fy_prior: prior || null, fy_current: current || null };
+    // Shaped exactly like BS_PL_DATA in "main gst tool/bs_pl_input.py" —
+    // web_adapters.process_full_scrutiny() writes this straight into a
+    // real bs_pl_input.py module for master_build.py to import.
+    const data = { _gstin: gstinField.value.trim() || null };
+    BSPL_ROWS.forEach(row => {
+      const prior = parseBsplNumber(document.querySelector(`[data-bspl="${row.key}-prior"]`).value);
+      const current = parseBsplNumber(document.querySelector(`[data-bspl="${row.key}-current"]`).value);
+      if (prior !== null || current !== null) data[row.key] = { fy_prior: prior, fy_current: current };
     });
     workbench.bs_pl = data;
     markDone("bs_pl");
@@ -550,6 +576,139 @@ const spy = new IntersectionObserver(entries => {
   });
 }, { rootMargin: "-15% 0px -70% 0px" });
 sections.forEach(s => spy.observe(s));
+
+// ---------------------------------------------------------------------
+// Run full scrutiny — assembles everything collected so far and runs the
+// real main gst tool engine (master_build.py) against it.
+// ---------------------------------------------------------------------
+function downloadBytes(bytes, filename) {
+  const blob = new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
+function statTile(cls, n, label) {
+  return `<div class="stat-tile ${cls}"><div class="n">${n}</div><div class="l">${label}</div></div>`;
+}
+
+function renderScrutinyResult(result) {
+  const results = document.getElementById("results");
+  const log = result.log || "";
+
+  // Every figure below is parsed straight out of master_build.py's own
+  // printed run summary (see its main()) — nothing here is invented. If a
+  // line's shape ever changes, that tile just doesn't render; the full raw
+  // log underneath is always the ground truth regardless.
+  const monthsMatch = log.match(/Months covered: \[(.*?)\]/);
+  const hsnMatch = log.match(/HSN & Fraud Pattern Checks: (\d+) total \((\d+) FLAG, (\d+) REVIEW\)/);
+  const flowMatch = log.match(/Flow \/ counterparty checks: (\d+) findings across (\d+) sheets \((\d+) FLAG, (\d+) REVIEW\)/);
+  const cancelledMatch = log.match(/Cancelled e-invoices found: (\d+)/);
+  const rectMatch = log.match(/Rectification pairs: (\d+)/);
+
+  let tiles = "";
+  if (monthsMatch) tiles += statTile("info", monthsMatch[1].split(",").filter(s => s.trim()).length, "Months covered");
+  if (hsnMatch) tiles += statTile("flag", hsnMatch[2], "HSN/fraud flags");
+  if (hsnMatch) tiles += statTile("review", hsnMatch[3], "HSN/fraud review");
+  if (flowMatch) tiles += statTile("flag", flowMatch[3], "Flow flags");
+  if (flowMatch) tiles += statTile("review", flowMatch[4], "Flow review");
+  if (cancelledMatch) tiles += statTile("info", cancelledMatch[1], "Cancelled e-inv.");
+  if (rectMatch) tiles += statTile("info", rectMatch[1], "Rectification pairs");
+
+  const gstin = gstinField.value.trim();
+  const fy = fyField.value.trim();
+  const kb = (result.output_bytes.length / 1024).toFixed(0);
+
+  results.hidden = false;
+  results.innerHTML = `
+    <section class="card">
+      <div class="card-head">
+        <div class="card-head-left">
+          <div class="card-title-row"><h2>Scrutiny complete</h2></div>
+          <p class="card-desc">${gstin ? `<span class="mono">${gstin}</span>` : ""}${gstin && fy ? " &middot; " : ""}${fy ? `FY ${fy}` : ""}</p>
+        </div>
+      </div>
+      ${tiles ? `<div class="stat-row">${tiles}</div>` : ""}
+      <div class="download-row">
+        <div>
+          <div class="fname">${result.output_name}</div>
+          <div class="fmeta">${kb} KB &middot; the real master_build.py output — Master Dashboard, per-month sheets, HSN &amp; forensic checks, QA review layer</div>
+        </div>
+        <button class="btn btn-primary" id="download-btn" type="button">Download workbook</button>
+      </div>
+      <details class="run-log">
+        <summary>Full run log</summary>
+        <pre>${log.replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]))}</pre>
+      </details>
+    </section>`;
+  document.getElementById("download-btn").addEventListener("click", () => downloadBytes(result.output_bytes, result.output_name));
+  results.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function renderScrutinyError(err) {
+  const results = document.getElementById("results");
+  results.hidden = false;
+  results.innerHTML = `
+    <section class="card">
+      <div class="card-head">
+        <div class="card-head-left">
+          <div class="card-title-row"><h2>Scrutiny couldn't run</h2></div>
+        </div>
+        <span class="status-pill" data-state="error"><span class="dot"></span>Failed</span>
+      </div>
+      <div class="card-body">
+        <div class="result-line error">${ICONS.warn}<p>${String(err.message || err).replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]))}</p></div>
+      </div>
+    </section>`;
+  results.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+document.getElementById("run-btn").addEventListener("click", async function () {
+  if (this.disabled) return;
+  const originalHtml = this.innerHTML;
+  this.disabled = true;
+  const t0 = performance.now();
+  // A full year's worth of checks genuinely takes a couple of minutes even
+  // natively (measured: ~2 min for 12 months under plain CPython) — WASM
+  // is slower still. Show elapsed time rather than a plain spinner, so a
+  // long wait reads as "working" instead of "frozen."
+  const tickHandle = setInterval(() => {
+    const secs = Math.round((performance.now() - t0) / 1000);
+    this.innerHTML = `${ICONS.upload} Running full scrutiny… (${secs}s — a full year typically takes 1-3 minutes, please keep this tab open)`;
+  }, 1000);
+  this.innerHTML = `${ICONS.upload} Running full scrutiny…`;
+
+  const files = [];
+  UPLOAD_SECTIONS.forEach(cfg => {
+    const r = workbench[cfg.id];
+    if (r) files.push([r.output_name, r.output_bytes]);
+  });
+  LEDGER_SLOTS.forEach(sl => {
+    const r = workbench[`ledgers:${sl.id}`];
+    if (r) files.push([r.name, r.bytes]);
+  });
+  MASTER_SLOTS.forEach(sl => {
+    const r = workbench[`masters:${sl.id}`];
+    if (r) files.push([r.name, r.bytes]);
+  });
+
+  try {
+    const result = await callFullScrutiny(files, workbench.bs_pl || null);
+    renderScrutinyResult(result);
+  } catch (err) {
+    console.error(err);
+    renderScrutinyError(err);
+  } finally {
+    clearInterval(tickHandle);
+    this.innerHTML = originalHtml;
+    updateRunbar();
+  }
+});
 
 // ---------------------------------------------------------------------
 updateRunbar();

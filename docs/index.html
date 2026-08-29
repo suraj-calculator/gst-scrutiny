@@ -219,6 +219,27 @@
   .btn-run:disabled { background: var(--surface-3); color: var(--ink-faint); border-color: var(--border); cursor: not-allowed; }
   .btn-run svg { width: 15px; height: 15px; }
 
+  .results { grid-column: 2; margin-top: -4px; }
+  .results .card { border-color: var(--accent); }
+  .results .card-head { background: var(--accent-tint); }
+  .stat-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; padding: 18px 20px 6px; }
+  .stat-tile { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 12px 11px; background: var(--surface-2); }
+  .stat-tile .n { font-family: 'Archivo', sans-serif; font-size: 22px; font-weight: 800; line-height: 1; }
+  .stat-tile .l { font-size: 10.5px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--ink-faint); margin-top: 5px; }
+  .stat-tile.flag .n { color: var(--flag-fg); }
+  .stat-tile.review .n { color: var(--review-fg); }
+  .stat-tile.pass .n { color: var(--pass-fg); }
+  .stat-tile.info .n { color: var(--info-fg); }
+  .stat-tile.skip .n { color: var(--ink-faint); }
+  .download-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 6px 20px 16px; padding: 14px 16px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); flex-wrap: wrap; }
+  .download-row .fname { font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: var(--ink); }
+  .download-row .fmeta { font-size: 11.5px; color: var(--ink-faint); margin-top: 2px; }
+  .btn-primary { background: var(--accent); color: #fff; border: 1px solid var(--accent-ink); }
+  .btn-primary:hover { background: var(--accent-ink); }
+  .run-log { margin: 0 20px 20px; }
+  .run-log summary { font-size: 12px; color: var(--ink-muted); cursor: pointer; }
+  .run-log pre { margin: 8px 0 0; padding: 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 11px; line-height: 1.6; max-height: 320px; overflow: auto; white-space: pre-wrap; }
+
   .toast { position: fixed; left: 50%; bottom: 92px; transform: translate(-50%, 12px); background: var(--ink); color: var(--bg); font-size: 12.5px; font-weight: 500; padding: 10px 16px; border-radius: 100px; box-shadow: var(--shadow-pop); opacity: 0; pointer-events: none; transition: opacity .18s ease, transform .18s ease; z-index: 60; white-space: nowrap; max-width: 90vw; overflow: hidden; text-overflow: ellipsis; }
   .toast.show { opacity: 1; transform: translate(-50%, 0); }
 
@@ -232,6 +253,8 @@
     .rail-item a { white-space: nowrap; }
     .rail-hint, .rail-divider, .rail-title { display: none; }
     main.pipeline { grid-column: 1; padding-top: 8px; }
+    .results { grid-column: 1; }
+    .stat-row { grid-template-columns: repeat(2, 1fr); }
   }
 </style>
 </head>
@@ -276,6 +299,8 @@
   </nav>
 
   <main class="pipeline" id="pipeline"></main>
+
+  <div class="results" id="results" hidden></div>
 </div>
 
 <div class="runbar">
@@ -287,9 +312,9 @@
       <div class="readiness-bar"><i id="opt-bar"></i></div>
       <span class="readiness-chip"><span id="opt-status" class="mono-num">0/9</span>&nbsp;optional sources ready</span>
     </div>
-    <button class="btn-run" id="run-btn" disabled title="Coming next — wiring the main GST scrutiny engine to the assembled inputs">
+    <button class="btn-run" id="run-btn" disabled title="Needs GSTR-1 and GSTR-3B ready, and the Python runtime loaded">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg>
-      Run full scrutiny (coming next)
+      Run full scrutiny
     </button>
   </div>
 </div>
