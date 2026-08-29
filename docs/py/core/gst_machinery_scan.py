@@ -1,0 +1,1 @@
+../../../main gst tool/gst_machinery_scan.py

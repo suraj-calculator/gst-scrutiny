@@ -1,0 +1,125 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>web_adapters.process_ewb spike</title>
+<style>
+  body { font-family: monospace; font-size: 13px; padding: 20px; white-space: pre-wrap; background: #10141C; color: #E7EAF2; }
+  .ok { color: #79D19A; }
+  .fail { color: #EF9797; }
+  .step { color: #9BA3B7; }
+</style>
+</head>
+<body>
+<div id="log">Loading...\n</div>
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
+<script>
+const logEl = document.getElementById("log");
+function log(msg, cls) {
+  const span = document.createElement("span");
+  if (cls) span.className = cls;
+  span.textContent = msg + "\n";
+  logEl.appendChild(span);
+}
+
+const INWARD_FILES = [
+  "EWB_MIS_Report_Excel (1).xls","EWB_MIS_Report_Excel (2).xls","EWB_MIS_Report_Excel (3).xls",
+  "EWB_MIS_Report_Excel (4).xls","EWB_MIS_Report_Excel (5).xls","EWB_MIS_Report_Excel (6).xls",
+  "EWB_MIS_Report_Excel (7).xls","EWB_MIS_Report_Excel (8).xls","EWB_MIS_Report_Excel (9).xls",
+  "EWB_MIS_Report_Excel (10).xls","EWB_MIS_Report_Excel (11).xls","EWB_MIS_Report_Excel (12).xls",
+  "EWB_MIS_Report_Excel (13).xls","EWB_MIS_Report_Excel (14).xls"
+];
+const OUTWARD_FILES = [
+  "EWB_MIS_Report_Excel.xls","EWB_MIS_Report_Excel (1).xls","EWB_MIS_Report_Excel (2).xls",
+  "EWB_MIS_Report_Excel (3).xls","EWB_MIS_Report_Excel (4).xls","EWB_MIS_Report_Excel (5).xls",
+  "EWB_MIS_Report_Excel (6).xls","EWB_MIS_Report_Excel (7).xls","EWB_MIS_Report_Excel (8).xls",
+  "EWB_MIS_Report_Excel (9).xls","EWB_MIS_Report_Excel (10).xls","EWB_MIS_Report_Excel (11).xls",
+  "EWB_MIS_Report_Excel (12).xls","EWB_MIS_Report_Excel (13).xls","EWB_MIS_Report_Excel (64).xls",
+  "EWB_MIS_Report_Excel (65).xls","EWB_MIS_Report_Excel (66).xls","EWB_MIS_Report_Excel (67).xls",
+  "EWB_MIS_Report_Excel (68).xls"
+];
+
+async function fetchAll(dir, names) {
+  const out = [];
+  for (const name of names) {
+    const resp = await fetch(`sample_data/${dir}/${encodeURIComponent(name)}`);
+    if (!resp.ok) throw new Error(`fetch failed for ${name}: HTTP ${resp.status}`);
+    const buf = new Uint8Array(await resp.arrayBuffer());
+    out.push([name, buf]);
+  }
+  return out;
+}
+
+async function main() {
+  logEl.textContent = "";
+  const t0 = performance.now();
+
+  log("STEP 1: loading Pyodide + pandas + micropip(openpyxl,xlrd,lxml,html5lib)...", "step");
+  const pyodide = await loadPyodide();
+  await pyodide.loadPackage(["pandas", "lxml", "html5lib", "xlrd"]);
+  await pyodide.loadPackage("micropip");
+  const micropip = pyodide.pyimport("micropip");
+  await micropip.install("openpyxl");
+  log(`  ok, ${((performance.now() - t0) / 1000).toFixed(1)}s`, "ok");
+
+  log("STEP 2: fetching real sample .xls files over HTTP...", "step");
+  const inwardFiles = await fetchAll("inward", INWARD_FILES);
+  const outwardFiles = await fetchAll("outward", OUTWARD_FILES);
+  log(`  ok, ${inwardFiles.length} inward + ${outwardFiles.length} outward files fetched`, "ok");
+
+  log("STEP 3: writing web_adapters.py + the real ewb/*.py scripts into the virtual FS...", "step");
+  pyodide.FS.mkdirTree("/site/py/ewb");
+  for (const rel of ["web_adapters.py"]) {
+    const r = await fetch(`py/${rel}`);
+    pyodide.FS.writeFile(`/site/py/${rel}`, await r.text());
+  }
+  for (const rel of ["auto_ewb_merger.py", "convert_ewb_files.py"]) {
+    const r = await fetch(`py/ewb/${rel}`);
+    pyodide.FS.writeFile(`/site/py/ewb/${rel}`, await r.text());
+  }
+  log("  ok", "ok");
+
+  log("STEP 4: calling web_adapters.process_ewb() with the real uploaded-style bytes...", "step");
+  pyodide.FS.mkdirTree("/work");
+  const pyNS = pyodide.toPy({
+    inward: inwardFiles,
+    outward: outwardFiles,
+  });
+  pyodide.globals.set("_ewb_input", pyNS);
+  const t1 = performance.now();
+  const summary = await pyodide.runPythonAsync(`
+import sys
+sys.path.insert(0, "/site/py")
+import web_adapters
+
+inward = [(name, bytes(data)) for name, data in _ewb_input["inward"]]
+outward = [(name, bytes(data)) for name, data in _ewb_input["outward"]]
+
+result = web_adapters.process_ewb(inward, outward, "/work")
+
+lines = []
+for direction in ("inward", "outward"):
+    r = result[direction]
+    if r is None:
+        lines.append(f"{direction}: NO OUTPUT")
+    else:
+        lines.append(f"{direction}: {r['rows']} rows -> {r['output_name']} ({len(r['output_bytes'])} bytes)")
+"\\n".join(lines)
+`);
+  log(`  ok, merge ran in ${((performance.now() - t1) / 1000).toFixed(1)}s`, "ok");
+  log(summary);
+
+  log(`\nALL STEPS PASSED in ${((performance.now() - t0) / 1000).toFixed(1)}s total.`, "ok");
+  log("web_adapters.process_ewb() runs correctly inside Pyodide against real sample files.", "ok");
+  document.title = "web_adapters.process_ewb spike — PASSED";
+}
+
+main().catch(err => {
+  log(`\nFAILED: ${err.message}`, "fail");
+  log(err.stack || "", "fail");
+  document.title = "web_adapters.process_ewb spike — FAILED";
+  console.error(err);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,85 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>pdfplumber spike</title>
+<style>
+  body { font-family: monospace; font-size: 13px; padding: 20px; white-space: pre-wrap; background: #10141C; color: #E7EAF2; }
+  .ok { color: #79D19A; }
+  .fail { color: #EF9797; }
+  .step { color: #9BA3B7; }
+</style>
+</head>
+<body>
+<div id="log">Loading Pyodide...\n</div>
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
+<script>
+const logEl = document.getElementById("log");
+function log(msg, cls) {
+  const span = document.createElement("span");
+  if (cls) span.className = cls;
+  span.textContent = msg + "\n";
+  logEl.appendChild(span);
+}
+
+async function main() {
+  logEl.textContent = "";
+  const t0 = performance.now();
+
+  log("STEP 1: loading Pyodide runtime...", "step");
+  const pyodide = await loadPyodide();
+  log(`  ok, ${((performance.now() - t0) / 1000).toFixed(1)}s`, "ok");
+
+  log("STEP 2: micropip.install('pdfplumber') — this is the real unknown...", "step");
+  await pyodide.loadPackage("micropip");
+  const micropip = pyodide.pyimport("micropip");
+  const t1 = performance.now();
+  try {
+    await micropip.install("pdfplumber");
+    log(`  ok, installed in ${((performance.now() - t1) / 1000).toFixed(1)}s`, "ok");
+  } catch (err) {
+    log(`  FAILED to install: ${err.message}`, "fail");
+    throw err;
+  }
+
+  log("STEP 3: fetching the real sample PDF (sample_data/sample_bo_profile.pdf)...", "step");
+  const resp = await fetch("sample_data/sample_bo_profile.pdf");
+  if (!resp.ok) throw new Error(`fetch failed: HTTP ${resp.status}`);
+  const buf = new Uint8Array(await resp.arrayBuffer());
+  log(`  ok, fetched ${buf.length} bytes`, "ok");
+
+  log("STEP 4: writing it into Pyodide's virtual FS...", "step");
+  pyodide.FS.mkdirTree("/work");
+  pyodide.FS.writeFile("/work/sample.pdf", buf);
+  log("  ok", "ok");
+
+  log("STEP 5: opening it with pdfplumber and extracting page 1 text + any table...", "step");
+  const t2 = performance.now();
+  const out = await pyodide.runPythonAsync(`
+import pdfplumber
+with pdfplumber.open("/work/sample.pdf") as pdf:
+    n_pages = len(pdf.pages)
+    p1 = pdf.pages[0]
+    text = p1.extract_text() or ""
+    tables = p1.extract_tables()
+result = f"pages={n_pages} | page1_text_chars={len(text)} | page1_tables={len(tables)}"
+result += "\\n--- first 300 chars of page 1 text ---\\n" + text[:300]
+result
+`);
+  log(`  ok, extracted in ${((performance.now() - t2) / 1000).toFixed(1)}s`, "ok");
+  log(out);
+
+  log(`\nALL STEPS PASSED in ${((performance.now() - t0) / 1000).toFixed(1)}s total.`, "ok");
+  log("pdfplumber (and its pypdfium2 dependency) DOES work in Pyodide.", "ok");
+  document.title = "pdfplumber spike — PASSED";
+}
+
+main().catch(err => {
+  log(`\nFAILED: ${err.message}`, "fail");
+  log(err.stack || "", "fail");
+  document.title = "pdfplumber spike — FAILED";
+  console.error(err);
+});
+</script>
+</body>
+</html>

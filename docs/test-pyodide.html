@@ -1,0 +1,94 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Pyodide smoke test</title>
+<style>
+  body { font-family: monospace; font-size: 13px; padding: 20px; white-space: pre-wrap; background: #10141C; color: #E7EAF2; }
+  .ok { color: #79D19A; }
+  .fail { color: #EF9797; }
+  .step { color: #9BA3B7; }
+</style>
+</head>
+<body>
+<div id="log">Loading Pyodide...\n</div>
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
+<script>
+const logEl = document.getElementById("log");
+function log(msg, cls) {
+  const span = document.createElement("span");
+  if (cls) span.className = cls;
+  span.textContent = msg + "\n";
+  logEl.appendChild(span);
+}
+
+async function main() {
+  logEl.textContent = "";
+  const t0 = performance.now();
+
+  log("STEP 1: loading Pyodide runtime from CDN...", "step");
+  const pyodide = await loadPyodide();
+  log(`  ok, pyodide loaded in ${((performance.now() - t0) / 1000).toFixed(1)}s`, "ok");
+
+  log("STEP 2: running trivial Python to confirm the interpreter works...", "step");
+  const result = pyodide.runPython("1 + 1");
+  log(`  ok, 1 + 1 = ${result}`, "ok");
+
+  log("STEP 3: fetching a real vendored script over HTTP (docs/py/core/gst_config.py)...", "step");
+  const resp = await fetch("py/core/gst_config.py");
+  if (!resp.ok) throw new Error(`fetch failed: HTTP ${resp.status}`);
+  const sourceText = await resp.text();
+  log(`  ok, fetched ${sourceText.length} bytes`, "ok");
+
+  log("STEP 4: writing it into Pyodide's virtual filesystem at /work/gst_config.py...", "step");
+  pyodide.FS.mkdirTree("/work");
+  pyodide.FS.writeFile("/work/gst_config.py", sourceText);
+  log("  ok, written", "ok");
+
+  log("STEP 5: importing it as a real Python module from the virtual FS and reading its own constants...", "step");
+  pyodide.runPython(`
+import sys
+sys.path.insert(0, "/work")
+import gst_config
+print("  ITC_ROLLFORWARD_MOM_THRESHOLD =", gst_config.ITC_ROLLFORWARD_MOM_THRESHOLD)
+print("  ITC_ROLLFORWARD_MOM_FLOOR =", gst_config.ITC_ROLLFORWARD_MOM_FLOOR)
+`);
+  log("  ok, module imported and constants read back correctly", "ok");
+
+  log("STEP 6: micropip.install('openpyxl')...", "step");
+  await pyodide.loadPackage("micropip");
+  const micropip = pyodide.pyimport("micropip");
+  const t1 = performance.now();
+  await micropip.install("openpyxl");
+  log(`  ok, installed in ${((performance.now() - t1) / 1000).toFixed(1)}s`, "ok");
+
+  log("STEP 7: round-tripping a real .xlsx through openpyxl (write, read back)...", "step");
+  pyodide.runPython(`
+import openpyxl
+wb = openpyxl.Workbook()
+ws = wb.active
+ws["A1"] = "GSTIN"
+ws["B1"] = "05AAECM6380J1ZA"
+wb.save("/work/smoke_test.xlsx")
+
+wb2 = openpyxl.load_workbook("/work/smoke_test.xlsx")
+ws2 = wb2.active
+assert ws2["A1"].value == "GSTIN"
+assert ws2["B1"].value == "05AAECM6380J1ZA"
+print("  round-trip OK:", ws2["A1"].value, "=", ws2["B1"].value)
+`);
+  log("  ok, openpyxl read/write works inside Pyodide", "ok");
+
+  log(`\nALL STEPS PASSED in ${((performance.now() - t0) / 1000).toFixed(1)}s total.`, "ok");
+  document.title = "Pyodide smoke test — PASSED";
+}
+
+main().catch(err => {
+  log(`\nFAILED: ${err.message}`, "fail");
+  log(err.stack || "", "fail");
+  document.title = "Pyodide smoke test — FAILED";
+  console.error(err);
+});
+</script>
+</body>
+</html>
