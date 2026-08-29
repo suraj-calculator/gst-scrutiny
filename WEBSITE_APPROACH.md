@@ -235,34 +235,58 @@ separate pass — `process_gstr3b`/`process_gstr2b` in `web_adapters.py`).
 **Phase 5 — `pdf to excel`** parsers. Deferred per Phase 1's finding — not
 started.
 
-**Phase 6 — `main gst tool`** itself: assemble everything into one virtual
-folder, run `master_build.main()`, surface the run summary + final workbook
-download. **Not started — this is the next real chunk of work.** Everything
-up through Phase 4 exists to feed this step; `master_build.py` itself is
-still unverified in this browser environment (12 files, its own dependency
-surface not yet checked against what Pyodide can/can't do the way pdfplumber
-was). The "Run full scrutiny" button is built and visible but deliberately
-kept disabled until this is real.
+**Phase 6 — `main gst tool` itself.** ✅ Done. `web_adapters.process_full_scrutiny()`
+assembles every merged/collected file into one folder, injects the browser's
+BS/P&L form as a real `bs_pl_input.py` module, and calls
+`master_build.main()` unchanged. Dependency check first (learning from the
+PDF situation): all 12 core files import nothing but `openpyxl` (already
+installed) plus stdlib — zero new package risk. "Run full scrutiny" is wired
+for real, gated on GSTR-1 + GSTR-3B (the same requirement `master_build.py`
+itself enforces), with real results (month count, HSN/fraud and flow
+finding counts parsed from `master_build`'s own printed summary, never
+fabricated), a full log, and a real download.
 
-**Phase 6.5 — main-thread freeze (new, found while testing Phase 2-4).**
-Confirmed by testing, not assumed: a real merge run blocks the tab for
-several seconds to ~15s depending on file count. Worth fixing before this
-reaches a real user, likely before Phase 6 given `master_build.py` will be
-the heaviest single call by far. Move the Pyodide session into a Web Worker;
-`app.js`'s `runPy()` is already the single choke point every call goes
-through, so this is a contained change (postMessage bridging + a worker
-script), not a rewrite.
+Verified twice: once under plain CPython with real matched-taxpayer sample
+data (GSTR-1 + GSTR-3B, same GSTIN) — valid 87-sheet workbook, opened with
+openpyxl. Once for real in the browser via the production page — ran to
+completion, downloaded a real 343 KB report (207 HSN/fraud flags, 1 flow
+flag, 1 rectification pair), matching the CPython run almost exactly.
+
+**Measured, not guessed**: a full 12-month scrutiny takes ~117s under plain
+CPython — the browser run took noticeably longer (WASM overhead). The "Run
+full scrutiny" button now shows a live elapsed-time counter with an explicit
+"1-3 minutes, keep this tab open" note instead of a plain spinner.
+
+**Phase 6.5 — main-thread freeze.** ✅ Fixed. Confirmed by testing (a merge
+call froze the tab, timing out browser automation), then fixed by moving
+Pyodide entirely into `docs/worker.js` — `app.js` never touches Pyodide
+directly, only postMessage. Re-verified after the fix: triggered the
+heaviest call (GSTR-3B zip extraction) and confirmed the tab stayed fully
+responsive (a page read that previously timed out returned instantly,
+typing worked with no lag) while the worker computed in the background.
 
 **Phase 7 — Balance Sheet/P&L form.** ✅ Done — real form in `index.html`,
-captured into `workbench.bs_pl` as a plain JS object shaped like the
-existing `BS_PL_DATA` dict, ready for Phase 6 to consume. Currently 6 of the
-~16 line items from `bs_pl_input.py`; the rest are a mechanical addition
-once Phase 6 needs them.
+now correctly keyed to `BS_PL_DATA`'s actual field names (fixed a bug where
+it was keyed by display label and stored raw strings instead of parsed
+numbers) and tagged with the entered GSTIN, ready for Phase 6 to consume.
+Currently 6 of the ~16 line items from `bs_pl_input.py`; the rest are a
+mechanical addition.
 
-**Phase 8 — deploy.** Not started. Enable GitHub Pages on this repo pointed
-at `/docs` on `main`. No GitHub Actions needed — plain static files are
-enough. From here on, shipping a fix is just `git push`. Reasonable to do
-this once Phase 6 lands, so there's something end-to-end to actually show.
+**Two more bugs found by testing the live page, both fixed**: an
+`enableAllDropzones()` bug where the disabled-check matched a dropzone's own
+disabled marker before it could be cleared, silently breaking real
+drag-and-drop/click-to-browse for every section since the previous commit
+(only the sample-data buttons still worked, since they check a different
+property) — and a **serious one**: `main gst tool/bs_pl_input.py` had real
+hardcoded financial figures for an actual taxpayer baked into the first
+commit. Since this repo was never pushed anywhere, rewrote local git history
+to strip it entirely and replaced it with the sanitized template it's
+actually meant to be.
+
+**Phase 8 — deploy.** Not started — the last remaining piece. Enable GitHub
+Pages on this repo pointed at `/docs` on `main`. No GitHub Actions needed —
+plain static files are enough. From here on, shipping a fix is just
+`git push`.
 
 ## Open items
 
