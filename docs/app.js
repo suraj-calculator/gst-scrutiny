@@ -80,23 +80,15 @@ const OPTIONAL_IDS = RAIL_META.filter(s => !s.required).map(s => s.id);
 const workbench = { done: new Set() };
 
 // ---------------------------------------------------------------------
-// Pyodide runtime
+// Pyodide runtime — runs in a Web Worker (worker.js), never on the main
+// thread. A multi-second merge used to freeze the tab (confirmed by
+// testing the earlier main-thread version); this keeps the UI responsive
+// throughout. All communication is via postMessage, matched by request id.
 // ---------------------------------------------------------------------
-let pyodide = null;
-let _callSeq = 0;
-
-const PY_FILES = [
-  "web_adapters.py",
-  "ewb/auto_ewb_merger.py",
-  "ewb/convert_ewb_files.py",
-  "merge/gstr1/gst_merge_common.py", "merge/gstr1/merge_gstr1.py",
-  "merge/gstr2a/gst_merge_common.py", "merge/gstr2a/merge_r2a.py",
-  "merge/gstr2b/gst_merge_common.py", "merge/gstr2b/merge_gstr2b.py",
-  "merge/gstr3b/gst_merge_common.py", "merge/gstr3b/merge_gstr3b.py",
-  "merge/e invoice/gst_merge_common.py", "merge/e invoice/merge_einv.py",
-  "extract_align/extractor/run.py",
-  "extract_align/alligner/complete_workbooks.py",
-];
+let worker = null;
+let workerReady = false;
+const pendingCalls = new Map(); // id -> {resolve, reject}
+let _reqSeq = 0;
 
 function setRuntimeState(state, text) {
   const pill = document.getElementById("runtime-pill");
@@ -108,89 +100,50 @@ function setRuntimeState(state, text) {
       : text;
 }
 
-async function initRuntime() {
-  try {
-    setRuntimeState("loading", "Starting Python runtime…");
-    pyodide = await loadPyodide();
-
-    setRuntimeState("loading", "Loading pandas, openpyxl, and friends…");
-    await pyodide.loadPackage(["pandas", "lxml", "html5lib", "xlrd"]);
-    await pyodide.loadPackage("micropip");
-    const micropip = pyodide.pyimport("micropip");
-    await micropip.install("openpyxl");
-
-    setRuntimeState("loading", "Loading the merge/align/extract scripts…");
-    for (const rel of PY_FILES) {
-      const resp = await fetch(`py/${rel}`);
-      if (!resp.ok) throw new Error(`failed to fetch py/${rel}: HTTP ${resp.status}`);
-      const full = `/site/py/${rel}`;
-      pyodide.FS.mkdirTree(full.substring(0, full.lastIndexOf("/")));
-      pyodide.FS.writeFile(full, await resp.text());
+function initRuntime() {
+  setRuntimeState("loading", "Starting Python runtime…");
+  worker = new Worker("worker.js");
+  worker.onmessage = e => {
+    const msg = e.data;
+    if (msg.type === "status") {
+      setRuntimeState(msg.state, msg.text);
+      if (msg.state === "ready") {
+        workerReady = true;
+        enableAllDropzones();
+      }
+    } else if (msg.type === "result") {
+      const pending = pendingCalls.get(msg.id);
+      if (!pending) return;
+      pendingCalls.delete(msg.id);
+      if (msg.ok) pending.resolve(msg.result);
+      else pending.reject(new Error(msg.error));
     }
-    pyodide.FS.mkdirTree("/site/py/core");
-    pyodide.FS.mkdirTree("/work");
-    await pyodide.runPythonAsync(`
-import sys
-sys.path.insert(0, "/site/py")
-import web_adapters
-`);
-
-    setRuntimeState("ready", "Python runtime ready");
-    enableAllDropzones();
-  } catch (err) {
+  };
+  worker.onerror = err => {
     console.error(err);
     setRuntimeState("error", "Runtime failed to load — reload the page");
-  }
+  };
 }
 
-async function runPy(code, globalsObj) {
-  for (const [k, v] of Object.entries(globalsObj || {})) {
-    const pyVal = pyodide.toPy(v);
-    pyodide.globals.set(k, pyVal);
-  }
-  const resultProxy = await pyodide.runPythonAsync(code);
-  if (resultProxy && typeof resultProxy.toJs === "function") {
-    const val = resultProxy.toJs({ dict_converter: Object.fromEntries });
-    resultProxy.destroy();
-    return val;
-  }
-  return resultProxy;
+function callWorker(adapter, args) {
+  return new Promise((resolve, reject) => {
+    const id = ++_reqSeq;
+    pendingCalls.set(id, { resolve, reject });
+    worker.postMessage({ type: "call", id, adapter, args });
+  });
 }
 
 async function callEwb(direction, filePairs) {
-  const inward = direction === "inward" ? filePairs : [];
-  const outward = direction === "outward" ? filePairs : [];
-  const result = await runPy(`
-inward = [(n, bytes(d)) for n, d in _inward]
-outward = [(n, bytes(d)) for n, d in _outward]
-result = web_adapters.process_ewb(inward, outward, _work_dir)
-result["${direction}"]
-`, { _inward: inward, _outward: outward, _work_dir: `/work/ewb_${direction}_${++_callSeq}` });
-  return result;
+  return await callWorker("ewb", { direction, filePairs });
 }
-
 async function callMerge(kind, filePairs) {
-  return await runPy(`
-files = [(n, bytes(d)) for n, d in _files]
-result = web_adapters.process_merge(_kind, files, _work_dir)
-result
-`, { _files: filePairs, _kind: kind, _work_dir: `/work/merge_${kind}_${++_callSeq}` });
+  return await callWorker("merge", { mergeKind: kind, filePairs });
 }
-
 async function callGstr3b(filePairs) {
-  return await runPy(`
-files = [(n, bytes(d)) for n, d in _files]
-result = web_adapters.process_gstr3b(files, _work_dir)
-result
-`, { _files: filePairs, _work_dir: `/work/gstr3b_${++_callSeq}` });
+  return await callWorker("gstr3b", { filePairs });
 }
-
 async function callGstr2b(filePairs) {
-  return await runPy(`
-files = [(n, bytes(d)) for n, d in _files]
-result = web_adapters.process_gstr2b(files, _work_dir)
-result
-`, { _files: filePairs, _work_dir: `/work/gstr2b_${++_callSeq}` });
+  return await callWorker("gstr2b", { filePairs });
 }
 
 // ---------------------------------------------------------------------
@@ -418,7 +371,7 @@ function showResult(cfg, r, extraLine) {
 }
 
 async function processSection(cfg, filePairs) {
-  if (!pyodide) return;
+  if (!workerReady) return;
   setStatus(cfg.id, "processing", "Processing…");
   document.querySelector(`[data-result="${cfg.id}"]`).innerHTML = "";
   const progWrap = document.querySelector(`[data-progress="${cfg.id}"]`);
