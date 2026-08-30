@@ -120,7 +120,7 @@
     border: 1px solid var(--border);
     border-radius: 16px;
     box-shadow: var(--shadow-pop);
-    max-width: 360px;
+    max-width: 440px;
     text-align: center;
   }
   .boot-spinner {
@@ -134,7 +134,7 @@
   @keyframes boot-spin { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .boot-spinner { animation: none; border-top-color: var(--border-strong); } }
   .boot-eyebrow { font-size: 10.5px; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase; color: var(--ink-faint); margin: 0; }
-  .boot-message { font-family: 'Archivo', sans-serif; font-size: 16px; font-weight: 700; color: var(--ink); margin: 0; min-height: 24px; text-wrap: balance; }
+  .boot-message { font-family: 'Archivo', sans-serif; font-size: 14.5px; font-weight: 600; line-height: 1.5; color: var(--ink); margin: 0; min-height: 84px; display: flex; align-items: center; text-wrap: balance; }
   .boot-sub { font-size: 12px; color: var(--ink-faint); margin: 0; }
   .boot-sub.error { color: var(--flag-fg); }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
@@ -315,9 +315,9 @@
 <div class="boot-overlay" id="boot-overlay">
   <div class="boot-card">
     <div class="boot-spinner" id="boot-spinner"></div>
-    <p class="boot-eyebrow">Booting up</p>
-    <p class="boot-message" id="boot-message">Chalo taxpayer ki gaand faade …</p>
-    <p class="boot-sub" id="boot-sub">Thoda samay lgega !</p>
+    <p class="boot-eyebrow">Did you know?</p>
+    <p class="boot-message" id="boot-message">GST launched at midnight on 1 July 2017, with a special session of both houses of Parliament in the Central Hall.</p>
+    <p class="boot-sub" id="boot-sub">Loading the scrutiny engine — usually takes under 10 seconds, once per visit.</p>
   </div>
 </div>
 

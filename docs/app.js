@@ -98,28 +98,40 @@ const pendingCalls = new Map(); // id -> {resolve, reject}
 let _reqSeq = 0;
 
 // One centralized boot overlay instead of every section separately saying
-// "waiting for runtime" — a single place to look, with a bit of personality
-// while Pyodide + pandas/openpyxl actually load (~5-10s, once per visit).
-const BOOT_MESSAGES = [
-  "Waking up Python…",
-  "Untangling GST spaghetti…",
-  "Teaching pandas to read Excel…",
-  "Politely interrogating openpyxl…",
-  "Double-checking Section 17(5)…",
-  "Reconciling a few imaginary invoices, just to warm up…",
-  "Summoning the HSN code oracle…",
-  "Convincing WebAssembly this is a good idea…",
+// "waiting for runtime" — a single place to look. Pyodide + pandas/openpyxl
+// take ~5-10s to load (once per visit); rather than a stream of "loading
+// step N" status text, cycle through real GST facts so there's something
+// worth reading instead of a wall of technical progress messages.
+const GST_FACTS = [
+  "GST launched at midnight on 1 July 2017, replacing 17 separate central and state taxes — excise duty, service tax, VAT and more — with one.",
+  "GST runs on 4 main slabs — 0%, 5%, 12%, 18% and 28% — with an extra cess on top of 28% for luxury and \"sin\" goods like tobacco and aerated drinks.",
+  "A transaction within a state splits GST into CGST + SGST; across states it's IGST — same total rate, different pockets it lands in.",
+  "The GST Council — the body that sets rates and rules — is chaired by the Union Finance Minister, with a finance minister from every state as a member.",
+  "GST was enabled by the 101st Constitutional Amendment Act, 2016, which inserted Article 246A giving both Parliament and state legislatures power to tax GST.",
+  "Input Tax Credit (ITC) is the backbone of GST: tax paid on purchases can be set off against tax owed on sales, so tax is only ever paid on the value actually added.",
+  "An e-way bill is mandatory for moving goods worth more than ₹50,000 — it's what the EWB Pattern and Timeline checks in this tool are built around.",
+  "GST registration is mandatory once turnover crosses ₹40 lakh for goods or ₹20 lakh for services (lower thresholds apply in some special-category states).",
+  "The Composition Scheme lets small taxpayers (turnover up to ₹1.5 crore) pay GST at a small flat rate instead of the regular slab rates — at the cost of not being able to claim ITC.",
+  "Petroleum products, alcohol for human consumption, and electricity are still outside GST — they continue under the old excise/VAT regime.",
+  "1 July is celebrated as GST Day in India, marking the day the country moved to a single national tax on goods and services.",
+  "Gold and gold jewellery attract a special GST rate of 3% — lower than almost anything else, reflecting how price-sensitive the category is.",
+  "GSTR-1 reports outward supplies (sales), GSTR-3B is the summary return with tax payment, and GSTR-9 is the annual return that reconciles the whole year.",
+  "Under Reverse Charge Mechanism (RCM), the buyer — not the seller — pays the GST directly to the government for certain notified goods and services.",
+  "Exports under GST are \"zero-rated\" — taxed at 0%, with exporters still allowed to claim credit for tax paid on their inputs.",
+  "HSN (Harmonised System of Nomenclature) codes classify goods for GST — the same coding system used in over 200 countries for customs.",
+  "E-invoicing — real-time reporting of B2B invoices to a government portal — is mandatory once a business crosses a notified turnover threshold, to curb fake invoicing.",
+  "GSTIN, the 15-digit GST registration number, encodes the state code in its first two digits and the PAN of the business in the next ten.",
 ];
 let _bootMsgTimer = null;
 
 function cycleBootMessage() {
   const el = document.getElementById("boot-message");
   let i = 0;
-  el.textContent = BOOT_MESSAGES[0];
+  el.textContent = GST_FACTS[0];
   _bootMsgTimer = setInterval(() => {
-    i = (i + 1) % BOOT_MESSAGES.length;
-    el.textContent = BOOT_MESSAGES[i];
-  }, 1700);
+    i = (i + 1) % GST_FACTS.length;
+    el.textContent = GST_FACTS[i];
+  }, 3400);
 }
 
 function setRuntimeState(state, text) {
