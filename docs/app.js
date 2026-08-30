@@ -160,9 +160,12 @@ function initRuntime() {
         enableAllDropzones();
         updateRunbar();
       }
+    } else if (msg.type === "started") {
+      const pending = pendingCalls.get(msg.id);
+      if (pending && pending.onStarted) pending.onStarted();
     } else if (msg.type === "result") {
       const pending = pendingCalls.get(msg.id);
-      if (!pending) return;
+      if (!pending) return; // already timed out and cleaned up — ignore
       pendingCalls.delete(msg.id);
       if (msg.ok) pending.resolve(msg.result);
       else pending.reject(new Error(msg.error));
@@ -174,28 +177,50 @@ function initRuntime() {
   };
 }
 
-function callWorker(adapter, args) {
+// Every call gets an explicit timeout — with the worker now processing one
+// call at a time (see worker.js's queue), a truly hung call would otherwise
+// show "Processing…" forever with zero feedback. Individual sections
+// normally finish in seconds; full_scrutiny genuinely can take a couple of
+// minutes (measured ~117s natively for a full year), so it gets much more
+// room before being treated as failed.
+const DEFAULT_TIMEOUT_MS = 3 * 60 * 1000;
+const FULL_SCRUTINY_TIMEOUT_MS = 10 * 60 * 1000;
+
+function callWorker(adapter, args, opts) {
+  opts = opts || {};
+  const timeoutMs = opts.timeoutMs || DEFAULT_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
     const id = ++_reqSeq;
-    pendingCalls.set(id, { resolve, reject });
+    const timer = setTimeout(() => {
+      pendingCalls.delete(id);
+      reject(new Error(
+        `Timed out after ${Math.round(timeoutMs / 1000)}s with no response. ` +
+        `Something went wrong internally — reload the page and try again.`
+      ));
+    }, timeoutMs);
+    pendingCalls.set(id, {
+      resolve: v => { clearTimeout(timer); resolve(v); },
+      reject: e => { clearTimeout(timer); reject(e); },
+      onStarted: opts.onStarted,
+    });
     worker.postMessage({ type: "call", id, adapter, args });
   });
 }
 
-async function callEwb(direction, filePairs) {
-  return await callWorker("ewb", { direction, filePairs });
+async function callEwb(direction, filePairs, onStarted) {
+  return await callWorker("ewb", { direction, filePairs }, { onStarted });
 }
-async function callMerge(kind, filePairs) {
-  return await callWorker("merge", { mergeKind: kind, filePairs });
+async function callMerge(kind, filePairs, onStarted) {
+  return await callWorker("merge", { mergeKind: kind, filePairs }, { onStarted });
 }
-async function callGstr3b(filePairs) {
-  return await callWorker("gstr3b", { filePairs });
+async function callGstr3b(filePairs, onStarted) {
+  return await callWorker("gstr3b", { filePairs }, { onStarted });
 }
-async function callGstr2b(filePairs) {
-  return await callWorker("gstr2b", { filePairs });
+async function callGstr2b(filePairs, onStarted) {
+  return await callWorker("gstr2b", { filePairs }, { onStarted });
 }
-async function callFullScrutiny(filePairs, bsPlData) {
-  return await callWorker("full_scrutiny", { filePairs, bsPlData });
+async function callFullScrutiny(filePairs, bsPlData, onStarted) {
+  return await callWorker("full_scrutiny", { filePairs, bsPlData }, { onStarted, timeoutMs: FULL_SCRUTINY_TIMEOUT_MS });
 }
 
 // ---------------------------------------------------------------------
@@ -258,7 +283,7 @@ function slotSectionHtml(id, title, desc, slots, opts) {
     <div class="card-body">
       <div class="slot-grid">
         ${slots.map(sl => `
-          <div class="slot" data-slot="${id}:${sl.id}" ${opts.disabled ? "" : `tabindex="0" role="button"`} aria-label="Upload ${sl.name}">
+          <div class="slot" data-slot="${id}:${sl.id}" ${opts.disabled ? 'data-disabled="true"' : `tabindex="0" role="button"`} aria-label="Upload ${sl.name}">
             <span class="slot-icon">${ICONS.file}</span>
             <span>
               <span class="slot-name">${sl.name}</span>
@@ -412,23 +437,32 @@ async function processSection(cfg, filePairs) {
   // actually selected, independent of whatever the processing result was.
   document.querySelector(`[data-filecount="${cfg.id}"]`).textContent =
     `${filePairs.length} file${filePairs.length === 1 ? "" : "s"} uploaded`;
-  setStatus(cfg.id, "processing", "Processing…");
+  // "Queued…" until the worker actually starts on this call — the worker
+  // processes one call at a time (see worker.js), so a section uploaded
+  // while another is still running will genuinely wait its turn rather
+  // than run at the same time (which used to silently corrupt both).
+  setStatus(cfg.id, "processing", "Queued…");
   document.querySelector(`[data-result="${cfg.id}"]`).innerHTML = "";
   const progWrap = document.querySelector(`[data-progress="${cfg.id}"]`);
-  progWrap.innerHTML = `<div class="progress-wrap"><div class="progress-track"><div class="progress-fill" data-fill></div></div><div class="progress-label">Running the real merge script on ${filePairs.length} file${filePairs.length === 1 ? "" : "s"}…</div></div>`;
-  requestAnimationFrame(() => { const f = progWrap.querySelector("[data-fill]"); if (f) f.style.width = "100%"; });
+  progWrap.innerHTML = "";
+
+  const onStarted = () => {
+    setStatus(cfg.id, "processing", "Processing…");
+    progWrap.innerHTML = `<div class="progress-wrap"><div class="progress-track"><div class="progress-fill" data-fill></div></div><div class="progress-label">Running the real merge script on ${filePairs.length} file${filePairs.length === 1 ? "" : "s"}…</div></div>`;
+    requestAnimationFrame(() => { const f = progWrap.querySelector("[data-fill]"); if (f) f.style.width = "100%"; });
+  };
 
   try {
     let result, extraLine;
     if (cfg.py.kind === "ewb") {
-      result = await callEwb(cfg.py.direction, filePairs);
+      result = await callEwb(cfg.py.direction, filePairs, onStarted);
       extraLine = result ? `${result.rows} rows merged` : null;
     } else if (cfg.py.kind === "merge") {
-      result = await callMerge(cfg.py.mergeKind, filePairs);
+      result = await callMerge(cfg.py.mergeKind, filePairs, onStarted);
     } else if (cfg.py.kind === "gstr2b") {
-      result = await callGstr2b(filePairs);
+      result = await callGstr2b(filePairs, onStarted);
     } else if (cfg.py.kind === "gstr3b") {
-      result = await callGstr3b(filePairs);
+      result = await callGstr3b(filePairs, onStarted);
     }
     progWrap.innerHTML = "";
     showResult(cfg, result, extraLine);
@@ -693,16 +727,23 @@ document.getElementById("run-btn").addEventListener("click", async function () {
 
   const originalHtml = this.innerHTML;
   this.disabled = true;
-  const t0 = performance.now();
-  // A full year's worth of checks genuinely takes a couple of minutes even
-  // natively (measured: ~2 min for 12 months under plain CPython) — WASM
-  // is slower still. Show elapsed time rather than a plain spinner, so a
-  // long wait reads as "working" instead of "frozen."
-  const tickHandle = setInterval(() => {
-    const secs = Math.round((performance.now() - t0) / 1000);
-    this.innerHTML = `${ICONS.upload} Running full scrutiny… (${secs}s — a full year typically takes 1-3 minutes, please keep this tab open)`;
-  }, 1000);
-  this.innerHTML = `${ICONS.upload} Running full scrutiny…`;
+  // Queued behind any still-running upload until the worker actually starts
+  // on this call (see worker.js's queue) — the elapsed-time clock only
+  // starts once it's genuinely executing, not while it's waiting its turn.
+  this.innerHTML = `${ICONS.upload} Queued — waiting for other uploads to finish…`;
+  let tickHandle = null;
+  const onStarted = () => {
+    const t0 = performance.now();
+    // A full year's worth of checks genuinely takes a couple of minutes even
+    // natively (measured: ~2 min for 12 months under plain CPython) — WASM
+    // is slower still. Show elapsed time rather than a plain spinner, so a
+    // long wait reads as "working" instead of "frozen."
+    tickHandle = setInterval(() => {
+      const secs = Math.round((performance.now() - t0) / 1000);
+      this.innerHTML = `${ICONS.upload} Running full scrutiny… (${secs}s — a full year typically takes 1-3 minutes, please keep this tab open)`;
+    }, 1000);
+    this.innerHTML = `${ICONS.upload} Running full scrutiny…`;
+  };
 
   const files = [];
   UPLOAD_SECTIONS.forEach(cfg => {
@@ -719,13 +760,13 @@ document.getElementById("run-btn").addEventListener("click", async function () {
   });
 
   try {
-    const result = await callFullScrutiny(files, workbench.bs_pl || null);
+    const result = await callFullScrutiny(files, workbench.bs_pl || null, onStarted);
     renderScrutinyResult(result);
   } catch (err) {
     console.error(err);
     renderScrutinyError(err);
   } finally {
-    clearInterval(tickHandle);
+    if (tickHandle) clearInterval(tickHandle);
     this.innerHTML = originalHtml;
     updateRunbar();
   }

@@ -131,14 +131,33 @@ result
 `, { _files: filePairs, _bs_pl: bsPlData || null, _work_dir: `/work/full_${++_callSeq}` });
 }
 
-onmessage = async (e) => {
+// Every call MUST run to full completion (including web_adapters.py's own
+// os.chdir(work_dir) / os.chdir(prev_cwd) cleanup) before the next one's
+// Python code starts. pyodide.globals is one shared mutable namespace, and
+// os.chdir affects the whole process's cwd — if two calls' Python code were
+// ever "in flight" at once, the second one's runPy() setup can silently
+// overwrite the first one's inputs/cwd out from under it, corrupting both
+// and hanging forever with no error (confirmed: a real user hit this by
+// uploading three sections within a few seconds of each other). Chaining
+// every call through one promise queue is what actually guarantees only
+// one is ever mid-flight, regardless of how fast messages arrive.
+let _queueTail = Promise.resolve();
+
+onmessage = (e) => {
   const msg = e.data;
   if (msg.type !== "call") return;
-  if (!ready) {
-    post({ type: "result", id: msg.id, ok: false, error: "Python runtime isn't ready yet" });
-    return;
-  }
+  _queueTail = _queueTail.then(() => handleCall(msg));
+};
+
+async function handleCall(msg) {
   try {
+    if (!ready) {
+      post({ type: "result", id: msg.id, ok: false, error: "Python runtime isn't ready yet" });
+      return;
+    }
+    // Lets the UI distinguish "queued behind another upload" from
+    // "actually running" instead of a single ambiguous "Processing…".
+    post({ type: "started", id: msg.id });
     let result;
     if (msg.adapter === "ewb") result = await callEwb(msg.args.direction, msg.args.filePairs);
     else if (msg.adapter === "merge") result = await callMerge(msg.args.mergeKind, msg.args.filePairs);
@@ -151,6 +170,10 @@ onmessage = async (e) => {
     console.error(err);
     post({ type: "result", id: msg.id, ok: false, error: String((err && err.message) || err) });
   }
-};
+  // Never let a thrown error break out of this function — that would leave
+  // _queueTail permanently rejected and silently stop every call queued
+  // after it. The try/catch above already turns every failure into a
+  // posted "result" message instead.
+}
 
 init();

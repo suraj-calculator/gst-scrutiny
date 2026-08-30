@@ -217,6 +217,8 @@
   .slot { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); cursor: pointer; }
   .slot:hover { border-color: var(--border-strong); }
   .slot[data-done="true"] { background: var(--pass-bg); border-color: var(--pass-border); }
+  .slot[data-disabled="true"] { cursor: not-allowed; opacity: 0.6; }
+  .slot[data-disabled="true"]:hover { border-color: var(--border); }
   .slot-icon { width: 26px; height: 26px; border-radius: 6px; background: var(--surface); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; flex: none; }
   .slot[data-done="true"] .slot-icon { background: var(--pass-fg); border-color: var(--pass-fg); }
   .slot-icon svg { width: 13px; height: 13px; color: var(--ink-faint); }
