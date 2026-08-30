@@ -1,0 +1,82 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>GSTR-2B full-adapter perf probe</title>
+<style>
+  body { font-family: monospace; font-size: 13px; padding: 20px; white-space: pre-wrap; background: #10141C; color: #E7EAF2; }
+</style>
+</head>
+<body>
+<div id="log">Loading...\n</div>
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
+<script>
+const logEl = document.getElementById("log");
+function log(msg) { logEl.textContent += msg + "\n"; }
+
+const NAMES = ["042025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","052025_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","062025_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","072025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","082025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","092025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","102025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","112025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","122025_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","012026_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","022026_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","032026_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx"];
+
+const PY_FILES = [
+  "web_adapters.py",
+  "extract_align/alligner/complete_workbooks.py",
+  "merge/gstr2b/gst_merge_common.py", "merge/gstr2b/merge_gstr2b.py",
+];
+
+async function main() {
+  const t0 = performance.now();
+  log("loading pyodide...");
+  const pyodide = await loadPyodide();
+  log(`pyodide loaded: ${((performance.now()-t0)/1000).toFixed(1)}s`);
+
+  await pyodide.loadPackage(["pandas", "lxml", "html5lib", "xlrd"]);
+  await pyodide.loadPackage("micropip");
+  const micropip = pyodide.pyimport("micropip");
+  await micropip.install("openpyxl");
+  log(`packages loaded: ${((performance.now()-t0)/1000).toFixed(1)}s`);
+
+  const bust = "?v=" + Date.now();
+  for (const rel of PY_FILES) {
+    const resp = await fetch(`py/${rel}` + bust, { cache: "no-store" });
+    const text = await resp.text();
+    const full = `/site/py/${rel}`;
+    pyodide.FS.mkdirTree(full.substring(0, full.lastIndexOf("/")));
+    pyodide.FS.writeFile(full, text);
+  }
+  pyodide.FS.mkdirTree("/site/py/core");
+  pyodide.FS.mkdirTree("/work");
+  await pyodide.runPythonAsync(`
+import sys
+sys.path.insert(0, "/site/py")
+import web_adapters
+`);
+  log(`vendored files + web_adapters imported: ${((performance.now()-t0)/1000).toFixed(1)}s`);
+
+  const filePairs = [];
+  for (const name of NAMES) {
+    const resp = await fetch(`sample_data/gstr2b_raw/${name}`, { cache: "no-store" });
+    filePairs.push([name, new Uint8Array(await resp.arrayBuffer())]);
+  }
+  log(`fetched ${NAMES.length} real sample files: ${((performance.now()-t0)/1000).toFixed(1)}s`);
+
+  // Call the REAL production entry point, exactly as worker.js's callGstr2b() does,
+  // but timed directly here (no Worker/postMessage layer in between).
+  pyodide.globals.set("_files", pyodide.toPy(filePairs));
+  const tCallStart = performance.now();
+  const summary = await pyodide.runPythonAsync(`
+import time
+files = [(n, bytes(d)) for n, d in _files]
+_t0 = time.time()
+result = web_adapters.process_gstr2b(files, "/work/gstr2b_probe")
+_t1 = time.time()
+f"process_gstr2b(): {_t1-_t0:.2f}s -> {result['output_name']} ({len(result['output_bytes'])} bytes)"
+`);
+  const tCallEnd = performance.now();
+  log(`\n${summary}`);
+  log(`JS-measured call wall time: ${((tCallEnd - tCallStart)/1000).toFixed(1)}s`);
+  log(`\nTOTAL WALL CLOCK (incl. pyodide/package boot): ${((performance.now()-t0)/1000).toFixed(1)}s`);
+  document.title = "GSTR-2B full-adapter probe — DONE";
+}
+main().catch(err => { log("FAILED: " + err.message); log(err.stack || ""); console.error(err); });
+</script>
+</body>
+</html>

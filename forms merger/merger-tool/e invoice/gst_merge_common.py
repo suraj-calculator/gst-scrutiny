@@ -91,11 +91,18 @@ def warn_duplicates(records):
 
 
 def sheet_max_data_row(ws, min_row):
-    """Last row index (1-based) that has at least one non-empty cell, from min_row onward."""
+    """Last row index (1-based) that has at least one non-empty cell, from min_row onward.
+
+    PERFORMANCE: uses iter_rows(values_only=True) rather than repeated
+    ws[r]/.cell().value access -- openpyxl builds a full Cell wrapper object
+    per access for the latter, which is the dominant cost on a large sheet
+    (measured: a real ~2000-row GSTR-2B 'B2B' sheet spent the bulk of a
+    28s merge step in exactly this kind of cell-by-cell scanning).
+    values_only=True yields plain values directly, skipping that overhead."""
     last = min_row - 1
-    for r in range(min_row, ws.max_row + 1):
-        if any(c.value is not None and str(c.value).strip() != "" for c in ws[r]):
-            last = r
+    for offset, row in enumerate(ws.iter_rows(min_row=min_row, values_only=True)):
+        if any(v is not None and str(v).strip() != "" for v in row):
+            last = min_row + offset
     return last
 
 

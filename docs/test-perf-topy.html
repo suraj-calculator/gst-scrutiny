@@ -1,0 +1,52 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>toPy perf probe</title>
+<style>body { font-family: monospace; font-size: 13px; padding: 20px; white-space: pre-wrap; background: #10141C; color: #E7EAF2; }</style>
+</head>
+<body>
+<div id="log">Loading...\n</div>
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
+<script>
+const logEl = document.getElementById("log");
+function log(msg) { logEl.textContent += msg + "\n"; }
+const NAMES = ["042025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","052025_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","062025_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","072025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","082025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","092025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","102025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","112025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","122025_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","012026_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","022026_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","032026_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx"];
+
+async function main() {
+  const pyodide = await loadPyodide();
+  log("pyodide ready");
+
+  const filePairs = [];
+  for (const n of NAMES) {
+    const resp = await fetch(`sample_data/gstr2b_raw/${n}`, { cache: "no-store" });
+    filePairs.push([n, new Uint8Array(await resp.arrayBuffer())]);
+  }
+  const totalKB = filePairs.reduce((s, [,b]) => s + b.length, 0) / 1024;
+  log(`fetched ${filePairs.length} files, ${totalKB.toFixed(0)} KB total`);
+
+  const t0 = performance.now();
+  const pyObj = pyodide.toPy(filePairs);
+  const t1 = performance.now();
+  log(`pyodide.toPy(filePairs): ${((t1-t0)/1000).toFixed(2)}s`);
+
+  const t2 = performance.now();
+  pyodide.globals.set("_files", pyObj);
+  const t3 = performance.now();
+  log(`pyodide.globals.set: ${((t3-t2)/1000).toFixed(2)}s`);
+
+  // Now the actual Python-side re-materialization the real code does:
+  // files = [(n, bytes(d)) for n, d in _files]
+  const t4 = performance.now();
+  await pyodide.runPythonAsync(`
+files = [(n, bytes(d)) for n, d in _files]
+len(files)
+`);
+  const t5 = performance.now();
+  log(`Python-side "files = [(n, bytes(d)) for n, d in _files]": ${((t5-t4)/1000).toFixed(2)}s`);
+
+  log(`\nTOTAL toPy+set+materialize: ${((t5-t0)/1000).toFixed(2)}s`);
+  document.title = "toPy probe — DONE";
+}
+main().catch(err => { log("FAILED: " + err.message); log(err.stack||""); console.error(err); });
+</script>
+</body>
+</html>

@@ -1,0 +1,132 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>GSTR-2B perf probe</title>
+<style>
+  body { font-family: monospace; font-size: 13px; padding: 20px; white-space: pre-wrap; background: #10141C; color: #E7EAF2; }
+</style>
+</head>
+<body>
+<div id="log">Loading...\n</div>
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
+<script>
+const logEl = document.getElementById("log");
+function log(msg) { logEl.textContent += msg + "\n"; }
+
+const NAMES = ["042025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","052025_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","062025_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","072025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","082025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","092025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","102025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","112025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","122025_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","012026_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","022026_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","032026_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx"];
+
+async function main() {
+  const t0 = performance.now();
+  log("loading pyodide...");
+  const pyodide = await loadPyodide({ cacheDir: "/tmp/pyodide_cache_" + Date.now() });
+  log(`pyodide loaded: ${((performance.now()-t0)/1000).toFixed(1)}s`);
+
+  await pyodide.loadPackage(["pandas", "lxml", "html5lib", "xlrd"]);
+  await pyodide.loadPackage("micropip");
+  const micropip = pyodide.pyimport("micropip");
+  await micropip.install("openpyxl");
+  log(`packages loaded: ${((performance.now()-t0)/1000).toFixed(1)}s`);
+
+  // Fetch fresh with cache-busting query string, bypassing any HTTP cache entirely.
+  const bust = "?v=" + Date.now();
+  const files = {
+    "gst_merge_common.py": "py/merge/gstr2b/gst_merge_common.py",
+    "merge_gstr2b.py": "py/merge/gstr2b/merge_gstr2b.py",
+  };
+  pyodide.FS.mkdirTree("/probe");
+  for (const [fname, path] of Object.entries(files)) {
+    const resp = await fetch(path + bust, { cache: "no-store" });
+    const text = await resp.text();
+    pyodide.FS.writeFile(`/probe/${fname}`, text);
+    // Confirm we actually got the NEW code, not a stale cached copy.
+    if (fname === "gst_merge_common.py") {
+      log(`gst_merge_common.py has PERFORMANCE fix marker: ${text.includes("iter_rows(min_row=min_row, values_only=True)")}`);
+    }
+  }
+
+  const sample_xlsx = {};
+  for (const name of NAMES) {
+    const resp = await fetch(`sample_data/gstr2b_raw/${name}`, { cache: "no-store" });
+    sample_xlsx[name] = new Uint8Array(await resp.arrayBuffer());
+  }
+  log(`fetched ${NAMES.length} real sample files`);
+
+  pyodide.FS.mkdirTree("/work");
+  for (const [name, bytes] of Object.entries(sample_xlsx)) {
+    pyodide.FS.writeFile(`/work/${name}`, bytes);
+  }
+
+  pyodide.globals.set("_names", pyodide.toPy(NAMES));
+
+  const out = await pyodide.runPythonAsync(`
+import sys, time, os
+sys.path.insert(0, "/probe")
+import merge_gstr2b as mg
+import gst_merge_common as gmc
+
+names = list(_names)
+os.chdir("/work")
+
+lines = []
+t0 = time.time()
+
+records = []
+for f in names:
+    tf0 = time.time()
+    from openpyxl import load_workbook
+    wb = load_workbook(f, data_only=True)
+    tf1 = time.time()
+    meta = mg.read_meta(wb, f)
+    key = (mg.fy_start_year(meta["fy"]), mg.month_key(meta["tax_period"]))
+    records.append({"path": f, "wb": wb, "meta": meta, "key": key})
+    lines.append(f"  load {f}: {tf1-tf0:.2f}s")
+t1 = time.time()
+lines.append(f"LOAD PHASE: {t1-t0:.2f}s")
+
+records.sort(key=lambda r: r["key"])
+all_sheet_names = []
+for r in records:
+    for name in r["wb"].sheetnames:
+        if name != "Read me" and name not in all_sheet_names:
+            all_sheet_names.append(name)
+
+from openpyxl import Workbook
+wb_out = Workbook()
+wb_out.remove(wb_out.active)
+gmc.copy_sheet_full(records[0]["wb"]["Read me"], wb_out, "Read me")
+
+t2 = time.time()
+per_sheet = []
+for sheet_name in all_sheet_names:
+    ts0 = time.time()
+    records_with_sheet = [r for r in records if sheet_name in r["wb"].sheetnames]
+    if not records_with_sheet:
+        continue
+    if sheet_name in mg.REPEAT_HEADER_SHEETS:
+        mg.merge_repeat_header_sheet(wb_out, sheet_name, records_with_sheet)
+    else:
+        mg.merge_static_header_sheet(wb_out, sheet_name, records_with_sheet)
+    ts1 = time.time()
+    per_sheet.append((sheet_name, ts1 - ts0))
+t3 = time.time()
+lines.append(f"MERGE/COPY PHASE: {t3-t2:.2f}s")
+for name, dt in sorted(per_sheet, key=lambda x: -x[1])[:6]:
+    lines.append(f"  {name}: {dt:.2f}s")
+
+t4 = time.time()
+wb_out.save("/work/OUT.xlsx")
+t5 = time.time()
+lines.append(f"SAVE PHASE: {t5-t4:.2f}s")
+lines.append(f"GRAND TOTAL: {t5-t0:.2f}s")
+"\\n".join(lines)
+`);
+  log("\n--- WASM PHASE TIMING ---");
+  log(out);
+  log(`\nTOTAL WALL CLOCK (incl. pyodide/package boot): ${((performance.now()-t0)/1000).toFixed(1)}s`);
+  document.title = "GSTR-2B perf probe — DONE";
+}
+main().catch(err => { log("FAILED: " + err.message); log(err.stack || ""); console.error(err); });
+</script>
+</body>
+</html>
