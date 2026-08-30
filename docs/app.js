@@ -180,10 +180,18 @@ function initRuntime() {
 // Every call gets an explicit timeout — with the worker now processing one
 // call at a time (see worker.js's queue), a truly hung call would otherwise
 // show "Processing…" forever with zero feedback. Individual sections
-// normally finish in seconds; full_scrutiny genuinely can take a couple of
-// minutes (measured ~117s natively for a full year), so it gets much more
-// room before being treated as failed.
-const DEFAULT_TIMEOUT_MS = 3 * 60 * 1000;
+// normally finish in well under a minute; full_scrutiny genuinely can take
+// a couple of minutes (measured ~117s natively for a full year), so it
+// gets much more room before being treated as failed.
+//
+// The timeout clock starts when the worker actually begins running this
+// call (the "started" message), NOT when it's queued — a call queued
+// behind other heavy uploads can legitimately wait a while before its turn
+// even comes, and that wait must never eat into its own processing budget.
+// (Bug found and fixed after exactly that happened: three 12-file uploads
+// queued together each timed out because the clock had already been
+// running since they were queued, not since they actually started.)
+const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 const FULL_SCRUTINY_TIMEOUT_MS = 10 * 60 * 1000;
 
 function callWorker(adapter, args, opts) {
@@ -191,17 +199,21 @@ function callWorker(adapter, args, opts) {
   const timeoutMs = opts.timeoutMs || DEFAULT_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
     const id = ++_reqSeq;
-    const timer = setTimeout(() => {
-      pendingCalls.delete(id);
-      reject(new Error(
-        `Timed out after ${Math.round(timeoutMs / 1000)}s with no response. ` +
-        `Something went wrong internally — reload the page and try again.`
-      ));
-    }, timeoutMs);
+    let timer = null;
     pendingCalls.set(id, {
       resolve: v => { clearTimeout(timer); resolve(v); },
       reject: e => { clearTimeout(timer); reject(e); },
-      onStarted: opts.onStarted,
+      onStarted: () => {
+        timer = setTimeout(() => {
+          pendingCalls.delete(id);
+          reject(new Error(
+            `Timed out after ${Math.round(timeoutMs / 1000)}s of actual processing with no ` +
+            `response. This means the Python code itself is genuinely stuck (not just queued) ` +
+            `— reload the page and try again with fewer files, or report this.`
+          ));
+        }, timeoutMs);
+        if (opts.onStarted) opts.onStarted();
+      },
     });
     worker.postMessage({ type: "call", id, adapter, args });
   });
@@ -404,13 +416,24 @@ async function filesToPairs(fileList) {
 // ---------------------------------------------------------------------
 // Upload sections — real processing
 // ---------------------------------------------------------------------
-function showError(cfg, message) {
+function escapeHtml(s) {
+  return String(s).replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
+}
+
+// `detail`, when given, is the complete raw error text (often a real Python
+// traceback from the actual script) — shown in full, not truncated, so the
+// user can see exactly what went wrong rather than a vague summary.
+function showError(cfg, message, detail) {
   setStatus(cfg.id, "error", "Failed");
+  const detailHtml = detail && detail !== message
+    ? `<pre class="error-detail">${escapeHtml(detail)}</pre>`
+    : "";
   document.querySelector(`[data-result="${cfg.id}"]`).innerHTML = `
     <div class="result-line error">
       ${ICONS.warn}
-      <p>${message}</p>
-    </div>`;
+      <p>${escapeHtml(message)}</p>
+    </div>
+    ${detailHtml}`;
   markUndone(cfg.id);
 }
 
@@ -469,7 +492,13 @@ async function processSection(cfg, filePairs) {
   } catch (err) {
     console.error(err);
     progWrap.innerHTML = "";
-    showError(cfg, `Error while processing: ${String(err.message || err).slice(0, 200)}`);
+    const full = String(err.message || err);
+    const firstLine = full.split("\n")[0];
+    const headline = firstLine.length > 160 ? firstLine.slice(0, 160) + "…" : firstLine;
+    // Only attach the detail block when there's genuinely more to show —
+    // a multi-line traceback or a headline that got truncated — so a
+    // plain one-line error doesn't get a redundant duplicate underneath.
+    showError(cfg, `Error while processing: ${headline}`, full.length > firstLine.length ? full : null);
   }
 }
 
@@ -696,6 +725,12 @@ function renderScrutinyResult(result) {
 
 function renderScrutinyError(err) {
   const results = document.getElementById("results");
+  const full = String(err.message || err);
+  const firstLine = full.split("\n")[0];
+  const headline = firstLine.length > 200 ? firstLine.slice(0, 200) + "…" : firstLine;
+  const detailHtml = full.length > firstLine.length
+    ? `<pre class="error-detail">${escapeHtml(full)}</pre>`
+    : "";
   results.hidden = false;
   results.innerHTML = `
     <section class="card">
@@ -706,7 +741,8 @@ function renderScrutinyError(err) {
         <span class="status-pill" data-state="error"><span class="dot"></span>Failed</span>
       </div>
       <div class="card-body">
-        <div class="result-line error">${ICONS.warn}<p>${String(err.message || err).replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]))}</p></div>
+        <div class="result-line error">${ICONS.warn}<p>${escapeHtml(headline)}</p></div>
+        ${detailHtml}
       </div>
     </section>`;
   results.scrollIntoView({ behavior: "smooth", block: "start" });
