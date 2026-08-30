@@ -103,6 +103,40 @@
   .runtime-pill[data-state="error"] { color: var(--flag-fg); background: var(--flag-bg); border-color: var(--flag-border); }
   .runtime-pill[data-state="error"] .dot { background: var(--flag-fg); }
   @media (prefers-reduced-motion: reduce) { .runtime-pill .dot { animation: none; } }
+
+  /* ---------- boot overlay ---------- */
+  .boot-overlay {
+    position: fixed; inset: 0; z-index: 100;
+    display: flex; align-items: center; justify-content: center;
+    background: color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter: blur(3px);
+    transition: opacity .35s ease;
+  }
+  .boot-overlay[data-hidden="true"] { opacity: 0; pointer-events: none; }
+  .boot-card {
+    display: flex; flex-direction: column; align-items: center; gap: 18px;
+    padding: 36px 40px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: var(--shadow-pop);
+    max-width: 360px;
+    text-align: center;
+  }
+  .boot-spinner {
+    width: 52px; height: 52px;
+    border-radius: 50%;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    animation: boot-spin 0.9s linear infinite;
+  }
+  .boot-spinner[data-state="error"] { border-top-color: var(--flag-fg); animation: none; }
+  @keyframes boot-spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .boot-spinner { animation: none; border-top-color: var(--border-strong); } }
+  .boot-eyebrow { font-size: 10.5px; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase; color: var(--ink-faint); margin: 0; }
+  .boot-message { font-family: 'Archivo', sans-serif; font-size: 16px; font-weight: 700; color: var(--ink); margin: 0; min-height: 24px; text-wrap: balance; }
+  .boot-sub { font-size: 12px; color: var(--ink-faint); margin: 0; }
+  .boot-sub.error { color: var(--flag-fg); }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
 
   .intro { grid-column: 2; padding-top: 28px; max-width: 62ch; }
@@ -259,6 +293,15 @@
 </style>
 </head>
 <body>
+
+<div class="boot-overlay" id="boot-overlay">
+  <div class="boot-card">
+    <div class="boot-spinner" id="boot-spinner"></div>
+    <p class="boot-eyebrow">Booting up</p>
+    <p class="boot-message" id="boot-message">Waking up Python…</p>
+    <p class="boot-sub" id="boot-sub">Happens once per visit — usually 5–10 seconds.</p>
+  </div>
+</div>
 
 <header class="top">
   <div class="top-inner">

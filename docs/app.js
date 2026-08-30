@@ -97,6 +97,31 @@ let workerReady = false;
 const pendingCalls = new Map(); // id -> {resolve, reject}
 let _reqSeq = 0;
 
+// One centralized boot overlay instead of every section separately saying
+// "waiting for runtime" — a single place to look, with a bit of personality
+// while Pyodide + pandas/openpyxl actually load (~5-10s, once per visit).
+const BOOT_MESSAGES = [
+  "Waking up Python…",
+  "Untangling GST spaghetti…",
+  "Teaching pandas to read Excel…",
+  "Politely interrogating openpyxl…",
+  "Double-checking Section 17(5)…",
+  "Reconciling a few imaginary invoices, just to warm up…",
+  "Summoning the HSN code oracle…",
+  "Convincing WebAssembly this is a good idea…",
+];
+let _bootMsgTimer = null;
+
+function cycleBootMessage() {
+  const el = document.getElementById("boot-message");
+  let i = 0;
+  el.textContent = BOOT_MESSAGES[0];
+  _bootMsgTimer = setInterval(() => {
+    i = (i + 1) % BOOT_MESSAGES.length;
+    el.textContent = BOOT_MESSAGES[i];
+  }, 1700);
+}
+
 function setRuntimeState(state, text) {
   const pill = document.getElementById("runtime-pill");
   pill.dataset.state = state;
@@ -105,10 +130,26 @@ function setRuntimeState(state, text) {
     state === "ready"
       ? "Only GSTR-1 and GSTR-3B are required. Everything else is optional and the final report will say plainly what was skipped."
       : text;
+
+  const overlay = document.getElementById("boot-overlay");
+  if (state === "ready") {
+    clearInterval(_bootMsgTimer);
+    overlay.dataset.hidden = "true";
+  } else if (state === "error") {
+    clearInterval(_bootMsgTimer);
+    document.getElementById("boot-spinner").dataset.state = "error";
+    document.getElementById("boot-message").textContent = "Something went wrong";
+    const sub = document.getElementById("boot-sub");
+    sub.textContent = text;
+    sub.classList.add("error");
+  }
+  // "loading" state: overlay already visible with rotating messages from
+  // cycleBootMessage(), started once in initRuntime() — nothing to do here.
 }
 
 function initRuntime() {
   setRuntimeState("loading", "Starting Python runtime…");
+  cycleBootMessage();
   worker = new Worker("worker.js");
   worker.onmessage = e => {
     const msg = e.data;
@@ -182,7 +223,7 @@ function uploadSectionHtml(cfg) {
         </div>
         <p class="card-desc">${cfg.desc}${cfg.note ? ` <em>${cfg.note}</em>` : ""}</p>
       </div>
-      <span class="status-pill" data-status="${cfg.id}" data-state="empty"><span class="dot"></span>Waiting for runtime…</span>
+      <span class="status-pill" data-status="${cfg.id}" data-state="empty"><span class="dot"></span>Not started</span>
     </div>
     <div class="card-body">
       <div class="dropzone" data-dropzone="${cfg.id}" data-disabled="true" tabindex="0" role="button" aria-label="Upload files for ${cfg.title}">
