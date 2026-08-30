@@ -1374,34 +1374,42 @@ def _read_cdnra_amendments(wb):
     return superseded, out_by_month
 
 
-def parse_2b_excel(path, month):
-    """Return dict(summary=..., b2b=[...], cdnr=[...], available=True) for ONE
-    month out of the merged (whole-FY) GSTR-2B workbook.
+_2B_FILE_CACHE = {}
 
-    B2B and B2B-CDNR include amendment-adjusted figures (bug report §7): a
-    row superseded by a later B2BA/B2B-CDNRA entry is excluded wherever its
-    stale original sits, and the amendment's own revised row is spliced in
-    under the amendment's own filing period instead -- see
-    _read_b2ba_amendments()/_read_cdnra_amendments() for why both halves of
-    that (exclude AND re-add, not just add) are necessary."""
-    if not path or not os.path.exists(path) or not path.lower().endswith((".xlsx", ".xlsm")):
-        raise mpu.PeriodParseError(f"Not a GSTR-2B Excel file: {path!r}")
+
+def _load_2b_file_data(path):
+    """The expensive, MONTH-INDEPENDENT half of parsing a merged (whole-FY)
+    GSTR-2B workbook: one load_workbook() call, one full scan each of
+    'ITC Available' / 'B2B' / 'B2B-CDNR' / 'B2BA' / 'B2B-CDNRA', with B2B and
+    B2B-CDNR rows indexed by their OWN period column into {month: [rows]}
+    dicts (amendment rows spliced in per month exactly as parse_2b_excel
+    always did, just computed once instead of per call).
+
+    PERFORMANCE: parse_2b_excel(path, month) is called once per month from
+    TWO call sites in master_build.py (summary_for_month() inside the main
+    per-month loop, and the FY-wide 2B invoice index) -- 24 calls in a
+    typical 12-month run, all against the exact same file. It used to redo
+    this entire load+scan from scratch every single call. Measured against
+    real full-year data: this was the dominant cost of a run that otherwise
+    timed out. Caching here, keyed by path, means the file is actually read
+    once; every parse_2b_excel() call after the first is a cheap dict
+    lookup. A failed parse is never cached, so a genuinely broken file still
+    fails on every call, matching the original behaviour (see below)."""
+    if path in _2B_FILE_CACHE:
+        return _2B_FILE_CACHE[path]
+
     wb = openpyxl.load_workbook(path, data_only=True)
 
-    # ---------- Summary (Table 3), quarter-block-scoped ----------
     if "ITC Available" not in wb.sheetnames:
         raise mpu.PeriodParseError(f"'ITC Available' sheet not found in {path!r}")
-    ws = wb["ITC Available"]
-    rows = list(ws.iter_rows(values_only=True))
-    start, end, group_index, group_count = mpu.find_block_and_index_for_month(rows, month)
-    summary = _summary_from_block(rows[start:end], group_index=group_index, group_count=group_count)
+    itc_rows = list(wb["ITC Available"].iter_rows(values_only=True))
 
     # ---------- amendment indices (whole-file, not month-scoped -- bug report §7) ----------
     superseded_inv, b2ba_by_month = _read_b2ba_amendments(wb)
     superseded_note, cdnra_by_month = _read_cdnra_amendments(wb)
 
-    # ---------- B2B invoice list, filtered by each row's OWN period column ----------
-    b2b = []
+    # ---------- B2B invoice list, indexed by each row's OWN period column ----------
+    b2b_by_month = {}
     if "B2B" in wb.sheetnames:
         ws_b2b = wb["B2B"]
         hmap = _2b_header_map(ws_b2b)
@@ -1429,8 +1437,7 @@ def parse_2b_excel(path, month):
         for r in _data_rows(ws_b2b):
             if not any(r) or not r[0] or mpu.is_marker_row(r):
                 continue
-            if _normalize_2b_row_period(r[c_period] if c_period < len(r) else None) != month:
-                continue
+            row_month = _normalize_2b_row_period(r[c_period] if c_period < len(r) else None)
             gstin_val = _2b_g(r, c_gstin)
             invno_val = _2b_g(r, c_invno)
             if (gstin_val, invno_val.strip().upper()) in superseded_inv:
@@ -1438,7 +1445,7 @@ def parse_2b_excel(path, month):
                 # figure for it, spliced in below under the AMENDMENT's own period) -- counting
                 # this stale row too would double-count the invoice. See _read_b2ba_amendments().
                 continue
-            b2b.append(dict(
+            b2b_by_month.setdefault(row_month, []).append(dict(
                 gstin=gstin_val, supplier=_2b_g(r, c_supplier),
                 invno=invno_val, invtype=_2b_g(r, c_invtype),
                 date=_2b_g(r, c_date), invval=_2b_gn(r, c_invval),
@@ -1449,11 +1456,12 @@ def parse_2b_excel(path, month):
                 itc_avail=_2b_g(r, c_itcavail), itc_avail_reason=_2b_g(r, c_reason),
                 via_amendment=False,
             ))
-    # splice in this month's amended (revised) invoice rows -- see _read_b2ba_amendments()
-    b2b.extend(b2ba_by_month.get(month, []))
+    # splice in each month's amended (revised) invoice rows -- see _read_b2ba_amendments()
+    for amend_month, amend_rows in b2ba_by_month.items():
+        b2b_by_month.setdefault(amend_month, []).extend(amend_rows)
 
-    # ---------- B2B-CDNR (credit/debit notes), same per-row period filtering ----------
-    cdnr = []
+    # ---------- B2B-CDNR (credit/debit notes), same per-row period indexing ----------
+    cdnr_by_month = {}
     if "B2B-CDNR" in wb.sheetnames:
         ws_cdnr = wb["B2B-CDNR"]
         hmap2 = _2b_header_map(ws_cdnr)
@@ -1479,14 +1487,13 @@ def parse_2b_excel(path, month):
         for r in _data_rows(ws_cdnr):
             if not any(r) or not r[0] or mpu.is_marker_row(r):
                 continue
-            if _normalize_2b_row_period(r[d_period] if d_period < len(r) else None) != month:
-                continue
+            row_month = _normalize_2b_row_period(r[d_period] if d_period < len(r) else None)
             gstin_val = _2b_g(r, d_gstin)
             note_val = _2b_g(r, d_note)
             if (gstin_val, note_val.strip().upper()) in superseded_note:
                 # Superseded by a later B2B-CDNRA entry -- see _read_cdnra_amendments().
                 continue
-            cdnr.append(dict(
+            cdnr_by_month.setdefault(row_month, []).append(dict(
                 gstin=gstin_val, supplier=_2b_g(r, d_supplier),
                 note=note_val, ntype=_2b_g(r, d_ntype),
                 supplytype=_2b_g(r, d_supplytype), date=_2b_g(r, d_date),
@@ -1496,10 +1503,41 @@ def parse_2b_excel(path, month):
                 cess=_2b_gn(r, d_cess),
                 via_amendment=False,
             ))
-    # splice in this month's amended (revised) note rows -- see _read_cdnra_amendments()
-    cdnr.extend(cdnra_by_month.get(month, []))
+    # splice in each month's amended (revised) note rows -- see _read_cdnra_amendments()
+    for amend_month, amend_rows in cdnra_by_month.items():
+        cdnr_by_month.setdefault(amend_month, []).extend(amend_rows)
 
+    data = dict(itc_rows=itc_rows, b2b_by_month=b2b_by_month, cdnr_by_month=cdnr_by_month)
+    _2B_FILE_CACHE[path] = data
+    return data
+
+
+def parse_2b_excel(path, month):
+    """Return dict(summary=..., b2b=[...], cdnr=[...], available=True) for ONE
+    month out of the merged (whole-FY) GSTR-2B workbook.
+
+    B2B and B2B-CDNR include amendment-adjusted figures (bug report §7): a
+    row superseded by a later B2BA/B2B-CDNRA entry is excluded wherever its
+    stale original sits, and the amendment's own revised row is spliced in
+    under the amendment's own filing period instead -- see
+    _read_b2ba_amendments()/_read_cdnra_amendments() for why both halves of
+    that (exclude AND re-add, not just add) are necessary.
+
+    The actual file reading is cached (once per path) by _load_2b_file_data()
+    -- see its docstring; this function just does the cheap per-month lookup
+    into that cached, already-indexed data."""
+    if not path or not os.path.exists(path) or not path.lower().endswith((".xlsx", ".xlsm")):
+        raise mpu.PeriodParseError(f"Not a GSTR-2B Excel file: {path!r}")
+
+    data = _load_2b_file_data(path)
+
+    start, end, group_index, group_count = mpu.find_block_and_index_for_month(data["itc_rows"], month)
+    summary = _summary_from_block(data["itc_rows"][start:end], group_index=group_index, group_count=group_count)
     summary["available"] = True
+
+    b2b = list(data["b2b_by_month"].get(month, []))
+    cdnr = list(data["cdnr_by_month"].get(month, []))
+
     return dict(summary=summary, b2b=b2b, cdnr=cdnr, available=True)
 
 
