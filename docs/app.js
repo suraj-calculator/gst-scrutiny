@@ -99,9 +99,9 @@ let _reqSeq = 0;
 
 // One centralized boot overlay instead of every section separately saying
 // "waiting for runtime" — a single place to look. Pyodide + pandas/openpyxl
-// take ~5-10s to load (once per visit); rather than a stream of "loading
-// step N" status text, cycle through real GST facts so there's something
-// worth reading instead of a wall of technical progress messages.
+// take ~5-10s to load (once per visit); instead of a stream of "loading
+// step N" status text, show one random GST fact for the whole wait — no
+// rotation/timer, just a single pick per page load.
 const GST_FACTS = [
   "GST launched at midnight on 1 July 2017, replacing 17 separate central and state taxes — excise duty, service tax, VAT and more — with one.",
   "GST runs on 4 main slabs — 0%, 5%, 12%, 18% and 28% — with an extra cess on top of 28% for luxury and \"sin\" goods like tobacco and aerated drinks.",
@@ -122,16 +122,9 @@ const GST_FACTS = [
   "E-invoicing — real-time reporting of B2B invoices to a government portal — is mandatory once a business crosses a notified turnover threshold, to curb fake invoicing.",
   "GSTIN, the 15-digit GST registration number, encodes the state code in its first two digits and the PAN of the business in the next ten.",
 ];
-let _bootMsgTimer = null;
-
-function cycleBootMessage() {
+function showRandomBootFact() {
   const el = document.getElementById("boot-message");
-  let i = 0;
-  el.textContent = GST_FACTS[0];
-  _bootMsgTimer = setInterval(() => {
-    i = (i + 1) % GST_FACTS.length;
-    el.textContent = GST_FACTS[i];
-  }, 3400);
+  el.textContent = GST_FACTS[Math.floor(Math.random() * GST_FACTS.length)];
 }
 
 function setRuntimeState(state, text) {
@@ -145,23 +138,21 @@ function setRuntimeState(state, text) {
 
   const overlay = document.getElementById("boot-overlay");
   if (state === "ready") {
-    clearInterval(_bootMsgTimer);
     overlay.dataset.hidden = "true";
   } else if (state === "error") {
-    clearInterval(_bootMsgTimer);
     document.getElementById("boot-spinner").dataset.state = "error";
     document.getElementById("boot-message").textContent = "Something went wrong";
     const sub = document.getElementById("boot-sub");
     sub.textContent = text;
     sub.classList.add("error");
   }
-  // "loading" state: overlay already visible with rotating messages from
-  // cycleBootMessage(), started once in initRuntime() — nothing to do here.
+  // "loading" state: overlay already visible with its one random fact from
+  // showRandomBootFact(), called once in initRuntime() — nothing to do here.
 }
 
 function initRuntime() {
   setRuntimeState("loading", "Starting Python runtime…");
-  cycleBootMessage();
+  showRandomBootFact();
   worker = new Worker("worker.js");
   worker.onmessage = e => {
     const msg = e.data;
