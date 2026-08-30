@@ -19,26 +19,26 @@ const ICONS = {
 const UPLOAD_SECTIONS = [
   { id: "ewb_inward", step: 1, title: "Inward E-Way Bill", required: false, py: { kind: "ewb", direction: "inward" },
     desc: "EWB MIS Report exports from the inward E-Way Bill portal folder.",
-    accept: "EWB_MIS_Report_Excel (N).xls", sampleDir: "inward" },
+    accept: "EWB_MIS_Report_Excel (N).xls" },
   { id: "ewb_outward", step: 2, title: "Outward E-Way Bill", required: false, py: { kind: "ewb", direction: "outward" },
     desc: "EWB MIS Report exports from the outward E-Way Bill portal folder.",
-    accept: "EWB_MIS_Report_Excel (N).xls", sampleDir: "outward" },
+    accept: "EWB_MIS_Report_Excel (N).xls" },
   { id: "einv", step: 3, title: "E-Invoice", required: false, py: { kind: "merge", mergeKind: "einv" },
     desc: "Monthly E-Invoice exports, any number of periods.",
-    accept: "per-period E-Invoice .xlsx", sampleDir: "einv" },
+    accept: "per-period E-Invoice .xlsx" },
   { id: "gstr1", step: 4, title: "GSTR-1", required: true, py: { kind: "merge", mergeKind: "gstr1" },
     desc: "Monthly or quarterly GSTR-1 exports for the financial year.",
-    accept: "per-period GSTR-1 .xlsx", sampleDir: "gstr1" },
+    accept: "per-period GSTR-1 .xlsx" },
   { id: "gstr2a", step: 5, title: "GSTR-2A", required: false, py: { kind: "merge", mergeKind: "gstr2a" },
     desc: "Monthly GSTR-2A exports for the financial year.",
-    accept: "per-period GSTR-2A .xlsx", sampleDir: null,
+    accept: "per-period GSTR-2A .xlsx",
     note: "Not yet exercised against real GSTR-2A data in this build — the code path is identical to the other return types, just unverified. Report an issue if it misbehaves." },
   { id: "gstr2b", step: 6, title: "GSTR-2B", required: false, py: { kind: "gstr2b" },
     desc: "Monthly GSTR-2B exports — every workbook is aligned to the same set of worksheets before merging.",
-    accept: "per-period GSTR-2B .xlsx", sampleDir: "gstr2b_raw" },
+    accept: "per-period GSTR-2B .xlsx" },
   { id: "gstr3b", step: 7, title: "GSTR-3B", required: true, py: { kind: "gstr3b" },
     desc: "GSTR3B_&lt;GSTIN&gt;_&lt;MMYYYY&gt;.zip bundles straight from the portal (or already-extracted .xlsx files).",
-    accept: ".zip bundles or .xlsx", sampleDir: "gstr3b" },
+    accept: ".zip bundles or .xlsx" },
 ];
 
 const LEDGER_SLOTS = [
@@ -232,11 +232,9 @@ function uploadSectionHtml(cfg) {
           <strong>Drop files here, or click to choose</strong>
           <span>${cfg.accept} &middot; multiple files</span>
         </span>
-        <span class="dz-actions">
-          ${cfg.sampleDir ? `<button type="button" class="btn small ghost" data-sample="${cfg.id}" disabled>Try with sample data</button>` : ""}
-        </span>
         <input type="file" data-input="${cfg.id}" multiple>
       </div>
+      <div class="file-count" data-filecount="${cfg.id}"></div>
       <div data-progress="${cfg.id}"></div>
       <div data-result="${cfg.id}"></div>
     </div>
@@ -342,9 +340,13 @@ function updateRunbar() {
   document.getElementById("opt-status").textContent = `${optDone}/${OPTIONAL_IDS.length}`;
   document.getElementById("opt-bar").style.width = `${(optDone / OPTIONAL_IDS.length) * 100}%`;
   const btn = document.getElementById("run-btn");
-  const canRun = workerReady && reqDone === REQUIRED_IDS.length;
-  btn.disabled = !canRun;
-  btn.title = canRun ? "" : "Needs GSTR-1 and GSTR-3B ready, and the Python runtime loaded";
+  // Only truly disabled while the runtime itself isn't up yet — nothing can
+  // run at all then. Once it's ready, the button stays clickable even with
+  // required sections missing; clicking it is what shows the "nothing
+  // uploaded" alert, rather than a silently disabled button with no
+  // explanation.
+  btn.disabled = !workerReady;
+  btn.title = workerReady ? "" : "Waiting for the Python runtime to finish loading";
 }
 
 function toast(msg) {
@@ -363,7 +365,6 @@ function enableAllDropzones() {
   document.querySelectorAll(".dropzone[data-disabled]").forEach(dz => {
     dz.removeAttribute("data-disabled");
   });
-  document.querySelectorAll("[data-sample]").forEach(btn => { btn.disabled = false; });
   UPLOAD_SECTIONS.forEach(cfg => setStatus(cfg.id, "empty", "Not started"));
 }
 
@@ -375,29 +376,6 @@ async function filesToPairs(fileList) {
   for (const f of fileList) out.push([f.name, await fileToBytes(f)]);
   return out;
 }
-async function fetchSample(dir, names) {
-  const out = [];
-  for (const name of names) {
-    const resp = await fetch(`sample_data/${dir}/${encodeURIComponent(name)}`);
-    if (!resp.ok) throw new Error(`sample fetch failed for ${dir}/${name}: HTTP ${resp.status}`);
-    out.push([name, new Uint8Array(await resp.arrayBuffer())]);
-  }
-  return out;
-}
-async function listSampleDir(dir) {
-  // No directory-listing endpoint on a plain static server — sample sets
-  // are declared per section below instead of discovered.
-  return SAMPLE_MANIFEST[dir] || [];
-}
-const SAMPLE_MANIFEST = {
-  inward: ["EWB_MIS_Report_Excel (1).xls","EWB_MIS_Report_Excel (2).xls","EWB_MIS_Report_Excel (3).xls","EWB_MIS_Report_Excel (4).xls","EWB_MIS_Report_Excel (5).xls","EWB_MIS_Report_Excel (6).xls","EWB_MIS_Report_Excel (7).xls","EWB_MIS_Report_Excel (8).xls","EWB_MIS_Report_Excel (9).xls","EWB_MIS_Report_Excel (10).xls","EWB_MIS_Report_Excel (11).xls","EWB_MIS_Report_Excel (12).xls","EWB_MIS_Report_Excel (13).xls","EWB_MIS_Report_Excel (14).xls"],
-  outward: ["EWB_MIS_Report_Excel.xls","EWB_MIS_Report_Excel (1).xls","EWB_MIS_Report_Excel (2).xls","EWB_MIS_Report_Excel (3).xls","EWB_MIS_Report_Excel (4).xls","EWB_MIS_Report_Excel (5).xls","EWB_MIS_Report_Excel (6).xls","EWB_MIS_Report_Excel (7).xls","EWB_MIS_Report_Excel (8).xls","EWB_MIS_Report_Excel (9).xls","EWB_MIS_Report_Excel (10).xls","EWB_MIS_Report_Excel (11).xls","EWB_MIS_Report_Excel (12).xls","EWB_MIS_Report_Excel (13).xls","EWB_MIS_Report_Excel (64).xls","EWB_MIS_Report_Excel (65).xls","EWB_MIS_Report_Excel (66).xls","EWB_MIS_Report_Excel (67).xls","EWB_MIS_Report_Excel (68).xls"],
-  gstr1: ["GSTR1_05AAGCA2491N1ZG_012024_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_022024_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_032024_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_042023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_052023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_062023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_072023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_082023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_092023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_102023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_112023_Inv_1.xlsx","GSTR1_05AAGCA2491N1ZG_122023_Inv_1.xlsx"],
-  einv: ["EINV_05AAGCA2491N1ZG_2023-24.xlsx","EINV_05AAGCA2491N1ZG_2023-24 (1).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (2).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (3).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (4).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (5).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (6).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (7).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (8).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (9).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (10).xlsx","EINV_05AAGCA2491N1ZG_2023-24 (11).xlsx"],
-  gstr2b_raw: ["042025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","052025_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","062025_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","072025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","082025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","092025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","102025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","112025_05AACFT2702L1ZD_GSTR2B_04082026.xlsx","122025_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","012026_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","022026_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx","032026_05AACFT2702L1ZD_GSTR2B_04082026_summary.xlsx"],
-  gstr3b: ["GSTR3B_05AAGCA2491N1ZG_042023.xlsx","GSTR3B_05AAGCA2491N1ZG_052023.xlsx","GSTR3B_05AAGCA2491N1ZG_062023.xlsx","GSTR3B_05AAGCA2491N1ZG_072023.xlsx","GSTR3B_05AAGCA2491N1ZG_082023.xlsx","GSTR3B_05AAGCA2491N1ZG_092023.xlsx","GSTR3B_05AAGCA2491N1ZG_102023.xlsx","GSTR3B_05AAGCA2491N1ZG_112023.xlsx","GSTR3B_05AAGCA2491N1ZG_122023.xlsx","GSTR3B_05AAGCA2491N1ZG_012024.xlsx","GSTR3B_05AAGCA2491N1ZG_022024.xlsx","GSTR3B_05AAGCA2491N1ZG_032024.xlsx"],
-};
-
 // ---------------------------------------------------------------------
 // Upload sections — real processing
 // ---------------------------------------------------------------------
@@ -429,6 +407,11 @@ function showResult(cfg, r, extraLine) {
 
 async function processSection(cfg, filePairs) {
   if (!workerReady) return;
+  // Shown immediately and left in place through processing/success/failure,
+  // so the user always has a plain confirmation of how many files they
+  // actually selected, independent of whatever the processing result was.
+  document.querySelector(`[data-filecount="${cfg.id}"]`).textContent =
+    `${filePairs.length} file${filePairs.length === 1 ? "" : "s"} uploaded`;
   setStatus(cfg.id, "processing", "Processing…");
   document.querySelector(`[data-result="${cfg.id}"]`).innerHTML = "";
   const progWrap = document.querySelector(`[data-progress="${cfg.id}"]`);
@@ -459,13 +442,12 @@ async function processSection(cfg, filePairs) {
 UPLOAD_SECTIONS.forEach(cfg => {
   const dz = document.querySelector(`[data-dropzone="${cfg.id}"]`);
   const input = document.querySelector(`[data-input="${cfg.id}"]`);
-  const sampleBtn = document.querySelector(`[data-sample="${cfg.id}"]`);
 
   function guarded(fn) {
     return (...args) => { if (dz.dataset.disabled === "true") return; fn(...args); };
   }
 
-  dz.addEventListener("click", guarded(e => { if (e.target !== sampleBtn) input.click(); }));
+  dz.addEventListener("click", guarded(() => input.click()));
   dz.addEventListener("keydown", guarded(e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); } }));
   ["dragenter", "dragover"].forEach(ev => dz.addEventListener(ev, guarded(e => { e.preventDefault(); dz.classList.add("drag"); })));
   ["dragleave", "drop"].forEach(ev => dz.addEventListener(ev, guarded(e => { e.preventDefault(); dz.classList.remove("drag"); })));
@@ -477,19 +459,6 @@ UPLOAD_SECTIONS.forEach(cfg => {
     if (input.files && input.files.length) await processSection(cfg, await filesToPairs(input.files));
     input.value = "";
   });
-  if (sampleBtn) {
-    sampleBtn.addEventListener("click", async e => {
-      e.stopPropagation();
-      if (sampleBtn.disabled) return;
-      try {
-        const names = await listSampleDir(cfg.sampleDir);
-        const pairs = await fetchSample(cfg.sampleDir, names);
-        await processSection(cfg, pairs);
-      } catch (err) {
-        toast(`Couldn't load sample data: ${err.message}`);
-      }
-    });
-  }
 });
 
 // ---------------------------------------------------------------------
@@ -711,6 +680,17 @@ function renderScrutinyError(err) {
 
 document.getElementById("run-btn").addEventListener("click", async function () {
   if (this.disabled) return;
+
+  const missingRequired = RAIL_META.filter(s => s.required && !workbench.done.has(s.id));
+  if (missingRequired.length > 0) {
+    if (workbench.done.size === 0) {
+      alert("Nothing uploaded yet. Please upload GSTR-1 and GSTR-3B — the two required inputs — before running the full scrutiny.");
+    } else {
+      alert(`Please also upload before running: ${missingRequired.map(s => s.title).join(", ")}.`);
+    }
+    return;
+  }
+
   const originalHtml = this.innerHTML;
   this.disabled = true;
   const t0 = performance.now();
