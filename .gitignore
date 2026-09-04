@@ -7,6 +7,7 @@
 *.pdf
 *.csv
 
+
 # Python
 __pycache__/
 *.pyc
@@ -16,3 +17,6 @@ __pycache__/
 desktop.ini
 .vscode/
 .idea/
+issue/
+input_files/
+updated scripts/

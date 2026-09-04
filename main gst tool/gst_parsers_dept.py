@@ -399,7 +399,10 @@ def parse_gstr9(path):
                 arn=None, date_of_filing=None,
                 table4_rcm_inward_taxable=None, table4_net_supplies_tax_igst=None,
                 table6_total_itc_availed=None, table7_total_reversed=None,
-                table8_itc_as_per_2b=None, table8_itc_as_per_6b6h=None, table8_difference=None)
+                table8_itc_as_per_2b=None, table8_itc_as_per_6b6h=None, table8_difference=None,
+                table13_itc_cgst=None, table13_itc_sgst=None, table13_itc_igst=None, table13_itc_cess=None,
+                table12_itc_reversed_cgst=None, table12_itc_reversed_sgst=None,
+                table12_itc_reversed_igst=None, table12_itc_reversed_cess=None)
     if not path or not os.path.exists(path):
         out["reason"] = "GSTR-9 not supplied for this taxpayer/FY."
         return out
@@ -527,6 +530,30 @@ def parse_gstr9(path):
             out["table9_late_fee_payable"], out["table9_late_fee_paid"] = _gxl_num(r[2]), _gxl_num(r[3])
     else:
         out["notes"].append("Item 9 sheet not found.")
+
+    # NEW (per instruction): Part V (Items 10-14), Table 12 (reversal of ITC availed during
+    # previous FY) and Table 13 (ITC availed for the previous financial year) -- the
+    # taxpayer's own filed, government-standard figure for ITC pertaining to the PRIOR FY but
+    # claimed within the CURRENT FY's returns (the Section 16(4) carry-forward window), used by
+    # the ITC Annual Summary sheet's 'carried forward from last FY' column. Confirmed present
+    # and populated on a real filed GSTR-9 (not assumed): Table 13 showed real, non-zero
+    # CGST/SGST/IGST/Cess figures on the taxpayer this was built against.
+    part5 = _gxl_sheet(wb, "Part V - Transactions Declared")
+    if part5 is not None:
+        r = _gxl_row_by_label(part5, 1, "itc availed for the previous financial year")
+        if r:
+            out["table13_itc_cgst"], out["table13_itc_sgst"], out["table13_itc_igst"], out["table13_itc_cess"] = (
+                _gxl_num(r[3]), _gxl_num(r[4]), _gxl_num(r[5]), _gxl_num(r[6]))
+        else:
+            out["notes"].append("Table 13 (ITC availed for the previous financial year) row not found.")
+        r = _gxl_row_by_label(part5, 1, "reversal of itc availed during previous financial year")
+        if r:
+            out["table12_itc_reversed_cgst"], out["table12_itc_reversed_sgst"], \
+                out["table12_itc_reversed_igst"], out["table12_itc_reversed_cess"] = (
+                _gxl_num(r[3]), _gxl_num(r[4]), _gxl_num(r[5]), _gxl_num(r[6]))
+    else:
+        out["notes"].append("Part V (Items 10-14) sheet not found -- Table 13 'ITC availed for "
+                             "the previous financial year' not available.")
 
     # Item 19 (dedicated Late Fee Payable/Paid sheet, Central+State) supersedes Item 9's late-fee
     # row if present -- it's the more granular, purpose-built source for this figure.

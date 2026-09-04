@@ -500,7 +500,16 @@ def write_eway(ws_find, ws_det, findings):
         # report, rather than showing every check consistently with an explicit "nothing this
         # month" where genuinely clean. Fixed: any check that attaches a header at all (length
         # >= 1) now always gets its block, whether or not it has data rows underneath.
-        if f.rows:
+        # PER EXPLICIT REQUEST: the EWB Detail sheet should only carry rows worth investigating,
+        # not a full listing of everything that's confirmed present/matched -- #1 ("EWB-Out
+        # invoice present in GSTR-1"), #5 ("EWB-Out invoice present in E-Invoice"), and #10
+        # ("EWB-In invoice matched to GSTR-2B") are confirmatory checks whose detail table is a
+        # listing of the MATCHED documents, not a mismatch -- removed from this sheet only.
+        # Nothing about the check itself changes: it still runs, and its ref/title/severity/
+        # summary-detail line still appears on the 'EWB' matrix sheet above (ws_find) exactly as
+        # before, so the pass/fail record for these three checks is not lost, only the bulky
+        # "here are all the matched documents" table that added no mismatch information here.
+        if f.rows and f.ref not in ("#1", "#5", "#10"):
             detail_blocks.append(f)
     for col, w in zip("ABCD", [6, 42, 10, 110]):
         ws_find.column_dimensions[col].width = w

@@ -357,20 +357,46 @@ def write_sheet(wb, sale_rows, purchase_rows, master_path, notes):
         ws.column_dimensions[get_column_letter(i)].width = w
 
 
+def _write_skipped_sheet(wb, sheet_name, title_text, reason_text):
+    """BUG FIX (bug report #4, 'Blocked Credit / Machinery HSN sheets missing from the final
+    workbook') -- see gst_blocked_credit._write_skipped_sheet for the full explanation; same
+    fix applied here. build_and_write() used to return its status STRING without ever calling
+    write_sheet() when the master list couldn't be found/read, so the sheet never existed in
+    the output workbook at all rather than being empty with a reason. Now the sheet always
+    exists, explicit about why it has no data this run when it can't be built."""
+    ws = wb.create_sheet(sheet_name)
+    ws.cell(1, 1, title_text).font = TITLEF
+    c = ws.cell(3, 1, "SKIPPED -- " + reason_text)
+    c.font = Font(size=11, italic=True, color="9C0006")
+    c.alignment = Alignment(wrap_text=True, vertical="top")
+    ws.column_dimensions["A"].width = 110
+    ws.row_dimensions[3].height = 60
+    return ws
+
+
 def build_and_write(wb, master_path, g1_hsn_by_month, ewb_out_rows, ewb_in_rows,
                      b2b_rows_by_month, self_gstin):
     """Entry point called from master_build.py. Never raises -- degrades to
     a skipped sheet with a clear reason."""
+    title = "MACHINERY HSN SCAN -- PURCHASE / SALE OF PLANT & MACHINERY (Ch.84 + Ch.85)"
     if not master_path:
-        return ("SKIPPED -- no machinery HSN master file found (content-detected: a sheet with "
-                 "header 'S.No / HSN Heading (4-digit) / Chapter / Description / Category / "
-                 "Flag.../ Match Rule...').")
+        reason = ("no machinery HSN master file found in the input folder (content-detected: a "
+                   "sheet with header 'S.No / HSN Heading (4-digit) / Chapter / Description / "
+                   "Category / Flag.../ Match Rule...'). Add Machinery_HSN_Master_v2.xlsx (or "
+                   "your own copy with the same header row) to the input folder and rerun to "
+                   "enable this sheet.")
+        _write_skipped_sheet(wb, "Machinery HSN Scan", title, reason)
+        return "SKIPPED -- " + reason
     try:
         master = load_master(master_path)
     except Exception as e:
-        return f"SKIPPED -- could not read the master file ({e!r})."
+        reason = f"could not read the master file ({e!r})."
+        _write_skipped_sheet(wb, "Machinery HSN Scan", title, reason)
+        return "SKIPPED -- " + reason
     if not master:
-        return f"SKIPPED -- master file {master_path!r} has no usable heading rows."
+        reason = f"master file {master_path!r} has no usable heading rows."
+        _write_skipped_sheet(wb, "Machinery HSN Scan", title, reason)
+        return "SKIPPED -- " + reason
 
     sale_rows = scan_gstr1_outward(g1_hsn_by_month, master)
     sale_rows += scan_ewb(ewb_out_rows, master, self_gstin, "Outward")

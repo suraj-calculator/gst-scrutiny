@@ -39,6 +39,24 @@ so it's exposed to the same risk even though it hasn't broken yet. This also
 means a file whose 'Read me' can't be parsed is skipped with a diagnostic
 dump instead of crashing the whole batch.
 
+v5: supports the GST portal's "document-wise" GSTR-2B export alongside the
+full/consolidated one. That export has no 'Read me' sheet at all (just
+whichever line-item sheets - typically B2B / B2B-CDNR - have data for the
+period), so detect_file_type() used to return None for it and the whole
+batch was silently treated as "no GSTR-2B files found". Such files are now
+detected as GSTR2B_DOCWISE and merged in exactly like a full export: Tax
+Period/FY/GSTIN come from the filename (gst_merge_common.meta_from_filename)
+since there's no Read me sheet to read them from; Legal Name (which isn't
+in the filename either) is backfilled from any sibling file in the same
+batch that shares the GSTIN and does have a Read me sheet, else left as
+"N/A". The output's own 'Read me' tab is copied from the first record that
+has one (previously always records[0], which broke if the chronologically
+earliest file was a document-wise export); if none of the batch's files
+have a Read me sheet, the output simply has no Read me tab. A full-export
+and a document-wise file for the same period still merge line-item sheets
+(B2B, B2B-CDNR, ...) together exactly as before - the export type only
+changes where the period's metadata comes from.
+
 Note on 'ITC Available' / 'ITC not available' / 'ITC Rejected': these three
 sheets have a fixed report layout. For a monthly filer the column headers
 are the same every month, but for a quarterly filer they show the actual
@@ -50,8 +68,13 @@ from openpyxl import Workbook, load_workbook
 from gst_merge_common import (
     find_xlsx_files, detect_file_type, fy_start_year, month_key,
     sheet_max_data_row, write_separator, HEADER_FONT, copy_sheet_full, warn_duplicates,
-    robust_read_meta, looks_like_fy, looks_like_tax_period,
+    robust_read_meta, looks_like_fy, looks_like_tax_period, meta_from_filename,
 )
+
+# detect_file_type() return values that count as "a GSTR-2B file" for this
+# script - the full/consolidated export (has Read me + ITC sheets) and the
+# portal's document-wise export (no Read me, just line-item sheets).
+GSTR2B_TYPES = ("GSTR2B", "GSTR2B_DOCWISE")
 
 # sheets whose header (incl. month labels) must be repeated for every period
 REPEAT_HEADER_SHEETS = {"ITC Available", "ITC not available", "ITC Rejected"}
@@ -101,7 +124,17 @@ def detect_header_rows(ws, default=6, max_scan_row=10):
 
 
 def read_meta(wb, path):
-    return robust_read_meta(wb["Read me"], FIXED_CELLS, LABEL_FALLBACKS, path, VALIDATORS)
+    if "Read me" in wb.sheetnames:
+        return robust_read_meta(wb["Read me"], FIXED_CELLS, LABEL_FALLBACKS, path, VALIDATORS)
+
+    # Document-wise export - no Read me sheet, so fall back to the filename.
+    meta = meta_from_filename(path)
+    if meta is None:
+        print(f"\n[SKIP] {path}")
+        print("  No 'Read me' sheet (document-wise export), and the filename")
+        print("  doesn't match '<ts>_<MMYYYY>_<GSTIN>_GSTR2B_<DDMMYYYY>_<n>.xlsx' -")
+        print("  can't determine its Tax Period/FY/GSTIN.")
+    return meta
 
 
 def sep_text(meta):
@@ -170,7 +203,7 @@ def merge_repeat_header_sheet(wb_out, sheet_name, records_with_sheet):
 
 def main(folder="."):
     files = find_xlsx_files(folder)
-    gstr2b_files = [f for f in files if detect_file_type(f) == "GSTR2B"]
+    gstr2b_files = [f for f in files if detect_file_type(f) in GSTR2B_TYPES]
     if not gstr2b_files:
         print("No GSTR-2B files found in this folder.")
         return
@@ -191,6 +224,17 @@ def main(folder="."):
         return
 
     records.sort(key=lambda r: r["key"])
+
+    # Document-wise records have no Legal Name (it isn't in the file or the
+    # filename) - backfill from any sibling record in this batch that shares
+    # the GSTIN and does carry a Legal Name (i.e. came from a Read me sheet).
+    gstin_to_name = {
+        r["meta"]["gstin"]: r["meta"]["legal_name"]
+        for r in records if r["meta"].get("legal_name")
+    }
+    for r in records:
+        if not r["meta"].get("legal_name"):
+            r["meta"]["legal_name"] = gstin_to_name.get(r["meta"]["gstin"], "N/A")
 
     print("Merge order (GSTR-2B):")
     for r in records:
@@ -221,7 +265,15 @@ def main(folder="."):
     wb_out = Workbook()
     wb_out.remove(wb_out.active)
 
-    copy_sheet_full(records[0]["wb"]["Read me"], wb_out, "Read me")
+    # Copy the Read me tab from the first record that actually has one
+    # (not necessarily records[0] - the chronologically earliest file may be
+    # a document-wise export with no Read me sheet at all).
+    read_me_source = next((r for r in records if "Read me" in r["wb"].sheetnames), None)
+    if read_me_source:
+        copy_sheet_full(read_me_source["wb"]["Read me"], wb_out, "Read me")
+    else:
+        print("\nNote: none of the input files had a 'Read me' sheet (all "
+              "document-wise exports) - output has no 'Read me' tab.")
 
     for sheet_name in all_sheet_names:
         records_with_sheet = [r for r in records if sheet_name in r["wb"].sheetnames]

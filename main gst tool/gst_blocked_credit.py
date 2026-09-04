@@ -363,6 +363,26 @@ def write_sheet(wb, matched_rows, category_totals, master_path, notes, all_rows=
             ws.column_dimensions[get_column_letter(i)].width = w
 
 
+def _write_skipped_sheet(wb, sheet_name, title_text, reason_text):
+    """BUG FIX (bug report #4, 'Blocked Credit / Machinery HSN sheets missing from the final
+    workbook'): build_and_write() used to return its status STRING without ever calling
+    write_sheet() when the master list couldn't be found/read -- so the sheet was not merely
+    empty, it never existed in the output workbook at all. That directly contradicts this
+    module's own stated discipline ('never a silently-empty sheet with no explanation') --
+    a vanished sheet is a WORSE silent gap than an empty one, since there is nothing in the
+    workbook itself pointing to the reason (only a console print the person may never see).
+    Now: whenever the real sheet can't be built, THIS sheet is written instead -- same tab
+    name, so it's never missing, just explicit about why it has no data this run."""
+    ws = wb.create_sheet(sheet_name)
+    ws.cell(1, 1, title_text).font = TITLEF
+    c = ws.cell(3, 1, "SKIPPED -- " + reason_text)
+    c.font = Font(size=11, italic=True, color="9C0006")
+    c.alignment = Alignment(wrap_text=True, vertical="top")
+    ws.column_dimensions["A"].width = 110
+    ws.row_dimensions[3].height = 60
+    return ws
+
+
 def build_and_write(wb, master_path, b2b_rows_by_month):
     """Entry point called from master_build.py. Returns a short status
     string for the run-summary printout. Never raises -- any failure
@@ -371,17 +391,35 @@ def build_and_write(wb, master_path, b2b_rows_by_month):
     if not master_path:
         master_path = cfg.BLOCKED_ITC_MASTER_FALLBACK_PATH
     if not master_path:
-        return ("SKIPPED -- no blocked-credit master file found (content-detected: single "
-                 "sheet, header 'Category / Search keyword / Indicative HSN/SAC') and no "
-                 "fallback path configured in gst_config.BLOCKED_ITC_MASTER_FALLBACK_PATH.")
+        reason = ("no blocked-credit master file found in the input folder (content-detected: "
+                   "single sheet, header 'Category / Search keyword / Indicative HSN/SAC') and "
+                   "no fallback path configured in gst_config.BLOCKED_ITC_MASTER_FALLBACK_PATH. "
+                   "Add GSTR_2B_Blocked_ITC_Master_Updated.xlsx (or your own copy with the same "
+                   "header row) to the input folder and rerun to enable this sheet.")
+        _write_skipped_sheet(wb, "Potential Blocked Credits",
+                              "POTENTIAL BLOCKED CREDITS -- SCREENING ONLY, MANUAL REVIEW REQUIRED",
+                              reason)
+        return "SKIPPED -- " + reason
     try:
         master = load_master(master_path)
     except Exception as e:
-        return f"SKIPPED -- could not read the master file ({e!r})."
+        reason = f"could not read the master file ({e!r})."
+        _write_skipped_sheet(wb, "Potential Blocked Credits",
+                              "POTENTIAL BLOCKED CREDITS -- SCREENING ONLY, MANUAL REVIEW REQUIRED",
+                              reason)
+        return "SKIPPED -- " + reason
     if not master:
-        return f"SKIPPED -- master file {master_path!r} has no usable keyword rows."
+        reason = f"master file {master_path!r} has no usable keyword rows."
+        _write_skipped_sheet(wb, "Potential Blocked Credits",
+                              "POTENTIAL BLOCKED CREDITS -- SCREENING ONLY, MANUAL REVIEW REQUIRED",
+                              reason)
+        return "SKIPPED -- " + reason
     if not b2b_rows_by_month or not any(b2b_rows_by_month.values()):
-        return "SKIPPED -- no GSTR-2B invoice-level data available for any month this run."
+        reason = "no GSTR-2B invoice-level data available for any month this run."
+        _write_skipped_sheet(wb, "Potential Blocked Credits",
+                              "POTENTIAL BLOCKED CREDITS -- SCREENING ONLY, MANUAL REVIEW REQUIRED",
+                              reason)
+        return "SKIPPED -- " + reason
 
     matched_rows, category_totals = scan(b2b_rows_by_month, master)
     all_rows = []
