@@ -312,3 +312,15 @@ def process_full_scrutiny(files, bs_pl_data, work_dir):
         }
     finally:
         os.chdir(prev_cwd)
+
+
+def process_pdf_export(xlsx_bytes, work_dir):
+    """Renders the already-built GST_MASTER workbook (see
+    process_full_scrutiny's output_bytes) to PDF -- the "Download PDF"
+    button's backend. Re-runs no scrutiny logic, just formats the finished
+    result. See gst_report_pdf.py for the actual rendering.
+
+    Returns {"output_bytes": bytes}.
+    """
+    import gst_report_pdf
+    return {"output_bytes": gst_report_pdf.render_workbook_pdf(xlsx_bytes, work_dir)}

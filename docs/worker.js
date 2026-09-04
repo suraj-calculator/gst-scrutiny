@@ -33,8 +33,15 @@ const PY_FILES = [
   "core/gst_parsers_dept.py",
   "core/gst_parsers_returns.py",
   "core/gst_report.py",
+  "core/gst_report_pdf.py",
   "core/master_build.py",
 ];
+
+// Binary (non-.py) assets fetched the same way but written as raw bytes,
+// not decoded as text -- currently just the Unicode font gst_report_pdf.py
+// needs (fpdf2's built-in core fonts are Latin-1 only and crash on the
+// Rupee sign, which is throughout this tool's output).
+const BINARY_FILES = ["core/assets/DejaVuSans.ttf"];
 
 function post(msg) { postMessage(msg); }
 
@@ -48,6 +55,7 @@ async function init() {
     await pyodide.loadPackage("micropip");
     const micropip = pyodide.pyimport("micropip");
     await micropip.install("openpyxl");
+    await micropip.install("fpdf2");
 
     post({ type: "status", state: "loading", text: "Loading the merge/align/extract scripts…" });
     for (const rel of PY_FILES) {
@@ -56,6 +64,13 @@ async function init() {
       const full = `/site/py/${rel}`;
       pyodide.FS.mkdirTree(full.substring(0, full.lastIndexOf("/")));
       pyodide.FS.writeFile(full, await resp.text());
+    }
+    for (const rel of BINARY_FILES) {
+      const resp = await fetch(`py/${rel}`);
+      if (!resp.ok) throw new Error(`failed to fetch py/${rel}: HTTP ${resp.status}`);
+      const full = `/site/py/${rel}`;
+      pyodide.FS.mkdirTree(full.substring(0, full.lastIndexOf("/")));
+      pyodide.FS.writeFile(full, new Uint8Array(await resp.arrayBuffer()));
     }
     pyodide.FS.mkdirTree("/site/py/core");
     pyodide.FS.mkdirTree("/work");
@@ -131,6 +146,13 @@ result
 `, { _files: filePairs, _bs_pl: bsPlData || null, _work_dir: `/work/full_${++_callSeq}` });
 }
 
+async function callPdfExport(xlsxBytes) {
+  return await runPy(`
+result = web_adapters.process_pdf_export(bytes(_xlsx), _work_dir)
+result
+`, { _xlsx: xlsxBytes, _work_dir: `/work/pdf_${++_callSeq}` });
+}
+
 // Every call MUST run to full completion (including web_adapters.py's own
 // os.chdir(work_dir) / os.chdir(prev_cwd) cleanup) before the next one's
 // Python code starts. pyodide.globals is one shared mutable namespace, and
@@ -164,6 +186,7 @@ async function handleCall(msg) {
     else if (msg.adapter === "gstr2b") result = await callGstr2b(msg.args.filePairs);
     else if (msg.adapter === "gstr3b") result = await callGstr3b(msg.args.filePairs);
     else if (msg.adapter === "full_scrutiny") result = await callFullScrutiny(msg.args.filePairs, msg.args.bsPlData);
+    else if (msg.adapter === "pdf_export") result = await callPdfExport(msg.args.xlsxBytes);
     else throw new Error(`unknown adapter: ${msg.adapter}`);
     post({ type: "result", id: msg.id, ok: true, result });
   } catch (err) {

@@ -111,8 +111,31 @@ def test_process_gstr2b():
     print("test_process_gstr2b: PASSED")
 
 
+def test_process_pdf_export():
+    # Real, already-built master workbook (from the CLI pipeline run against
+    # a real taxpayer) — exercises the exact web_adapters.process_pdf_export
+    # -> gst_report_pdf.render_workbook_pdf path worker.js calls for the
+    # "Download PDF" button, not just the module in isolation.
+    src = os.path.join(REPO, "builds", "05AAAFB8782C1ZO_FY2023-24", "final",
+                        "GST_MASTER_05AAAFB8782C1ZO_FY2023-24.xlsx")
+    assert os.path.exists(src), f"expected reference master workbook at {src}"
+    with open(src, "rb") as f:
+        xlsx_bytes = f.read()
+    work_dir = os.path.join(HERE, "_test_work_pdf_export")
+    shutil.rmtree(work_dir, ignore_errors=True)
+    try:
+        result = web_adapters.process_pdf_export(xlsx_bytes, work_dir)
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+    assert result is not None and result.get("output_bytes"), "expected pdf output_bytes"
+    assert result["output_bytes"][:4] == b"%PDF", "output doesn't start with a PDF header"
+    print(f"pdf_export: {len(xlsx_bytes)} byte xlsx -> {len(result['output_bytes'])} byte pdf")
+    print("test_process_pdf_export: PASSED")
+
+
 if __name__ == "__main__":
     test_process_ewb()
     test_process_merge()
     test_process_gstr3b()
     test_process_gstr2b()
+    test_process_pdf_export()

@@ -49,10 +49,10 @@ const LEDGER_SLOTS = [
   { id: "comparison", name: "Tax Liability & ITC Comparison", ext: "XLSX" },
   { id: "table8a", name: "Table 8A", ext: "XLSX" },
 ];
-const PDF_SLOTS = [
-  { id: "bo_profile", name: "BO / 360° Profile", ext: "PDF" },
-  { id: "gstr9", name: "GSTR-9 Annual Return", ext: "PDF" },
-  { id: "gstr9c", name: "GSTR-9C Reconciliation", ext: "PDF" },
+const ANNUAL_DOC_SLOTS = [
+  { id: "bo_profile", name: "BO / 360° Profile", ext: "XLSX" },
+  { id: "gstr9", name: "GSTR-9 Annual Return", ext: "XLSX" },
+  { id: "gstr9c", name: "GSTR-9C Reconciliation", ext: "XLSX" },
 ];
 const MASTER_SLOTS = [
   { id: "hsn_master", name: "HSN / SAC Code Master", ext: "XLSX" },
@@ -74,7 +74,7 @@ const BSPL_ROWS = [
 const RAIL_META = [
   ...UPLOAD_SECTIONS.map(s => ({ id: s.id, step: s.step, title: s.title, required: s.required })),
   { id: "ledgers", step: 8, title: "Ledgers & Portal Reports", required: false },
-  { id: "annual_pdfs", step: 9, title: "Annual PDF Reports", required: false },
+  { id: "annual_pdfs", step: 9, title: "Annual Reports", required: false },
   { id: "masters", step: 10, title: "Reference Masters", required: false },
   { id: "bs_pl", step: 11, title: "Balance Sheet / P&L", required: false },
 ];
@@ -237,6 +237,13 @@ async function callGstr2b(filePairs, onStarted) {
 async function callFullScrutiny(filePairs, bsPlData, onStarted) {
   return await callWorker("full_scrutiny", { filePairs, bsPlData }, { onStarted, timeoutMs: FULL_SCRUTINY_TIMEOUT_MS });
 }
+async function callPdfExport(xlsxBytes, onStarted) {
+  // Reuses the long timeout — rendering every sheet of a full year's
+  // workbook to PDF is comparable in cost to the scrutiny run itself
+  // (~1 min native CPython on a real 92-sheet/127k-row workbook; budget
+  // more in-browser WASM).
+  return await callWorker("pdf_export", { xlsxBytes }, { onStarted, timeoutMs: FULL_SCRUTINY_TIMEOUT_MS });
+}
 
 // ---------------------------------------------------------------------
 // Rendering
@@ -346,12 +353,9 @@ pipeline.innerHTML =
   UPLOAD_SECTIONS.map(uploadSectionHtml).join("") +
   slotSectionHtml("ledgers", "Ledgers &amp; Portal Reports",
     "Straight portal exports — no conversion needed, stored as-is.", LEDGER_SLOTS) +
-  slotSectionHtml("annual_pdfs", "Annual PDF Reports",
-    "PDF exports from the portal, normally converted to structured Excel automatically.",
-    PDF_SLOTS, {
-      disabled: true, deferred: true,
-      footnote: "Deferred: the PDF library this needs (pdfplumber) depends on a component with no WebAssembly build, so it can't run in the browser yet. Confirmed by testing directly — not an assumption. These 3 inputs are optional, so the rest of the tool works without them.",
-    }) +
+  slotSectionHtml("annual_pdfs", "Annual Reports",
+    "BO / 360° Profile, GSTR-9 and GSTR-9C — as the structured Excel export, not the PDF. (The PDF library this would need has no WebAssembly build, so it can't run in-browser — export these three from the portal as Excel first.)",
+    ANNUAL_DOC_SLOTS) +
   slotSectionHtml("masters", "Reference Masters",
     "Your organisation's own reference lists — upload once, reused on every filing.",
     MASTER_SLOTS, { persist: true }) +
@@ -399,9 +403,10 @@ function toast(msg) {
 
 function enableAllDropzones() {
   // Every upload section's dropzone starts with its own data-disabled="true"
-  // marker (cleared here once the runtime is ready). Deferred sections
-  // (Annual PDF Reports) use .slot elements, not .dropzone, so they're
-  // never matched by this selector and stay off on their own.
+  // marker (cleared here once the runtime is ready). Slot-based sections
+  // (Ledgers, Annual Reports, Reference Masters) use .slot elements, not
+  // .dropzone — plain byte capture, no worker processing — so they're never
+  // matched by this selector and are usable immediately, runtime or not.
   document.querySelectorAll(".dropzone[data-disabled]").forEach(dz => {
     dz.removeAttribute("data-disabled");
   });
@@ -568,6 +573,7 @@ function wireSlotSection(sectionId, slots, opts) {
   }};
 }
 wireSlotSection("ledgers", LEDGER_SLOTS);
+wireSlotSection("annual_pdfs", ANNUAL_DOC_SLOTS);
 const mastersHandle = wireSlotSection("masters", MASTER_SLOTS, { persist: true });
 
 // Reference masters persist across visits — this is genuinely per-viewer
@@ -657,8 +663,13 @@ sections.forEach(s => spy.observe(s));
 // Run full scrutiny — assembles everything collected so far and runs the
 // real main gst tool engine (master_build.py) against it.
 // ---------------------------------------------------------------------
+const MIME_TYPES = {
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  pdf: "application/pdf",
+};
 function downloadBytes(bytes, filename) {
-  const blob = new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const ext = filename.split(".").pop().toLowerCase();
+  const blob = new Blob([bytes], { type: MIME_TYPES[ext] || "application/octet-stream" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -715,7 +726,10 @@ function renderScrutinyResult(result) {
           <div class="fname">${result.output_name}</div>
           <div class="fmeta">${kb} KB &middot; the real master_build.py output — Master Dashboard, per-month sheets, HSN &amp; forensic checks, QA review layer</div>
         </div>
-        <button class="btn btn-primary" id="download-btn" type="button">Download workbook</button>
+        <div class="download-btns">
+          <button class="btn btn-primary" id="download-btn" type="button">Download Excel</button>
+          <button class="btn" id="download-pdf-btn" type="button">Download PDF</button>
+        </div>
       </div>
       <details class="run-log">
         <summary>Full run log</summary>
@@ -723,6 +737,36 @@ function renderScrutinyResult(result) {
       </details>
     </section>`;
   document.getElementById("download-btn").addEventListener("click", () => downloadBytes(result.output_bytes, result.output_name));
+
+  const pdfBtn = document.getElementById("download-pdf-btn");
+  const pdfName = result.output_name.replace(/\.xlsx$/i, ".pdf");
+  let pdfCache = null; // generated lazily, once — re-clicking re-downloads the same bytes instead of re-rendering
+  pdfBtn.addEventListener("click", async () => {
+    if (pdfCache) { downloadBytes(pdfCache, pdfName); return; }
+    const original = pdfBtn.innerHTML;
+    pdfBtn.disabled = true;
+    let tick = null;
+    const onStarted = () => {
+      const t0 = performance.now();
+      tick = setInterval(() => {
+        const secs = Math.round((performance.now() - t0) / 1000);
+        pdfBtn.innerHTML = `Rendering PDF… (${secs}s)`;
+      }, 1000);
+    };
+    pdfBtn.innerHTML = "Queued…";
+    try {
+      const pdfResult = await callPdfExport(result.output_bytes, onStarted);
+      pdfCache = pdfResult.output_bytes;
+      downloadBytes(pdfCache, pdfName);
+    } catch (err) {
+      console.error(err);
+      toast(`PDF export failed: ${String(err.message || err).split("\n")[0]}`);
+    } finally {
+      if (tick) clearInterval(tick);
+      pdfBtn.disabled = false;
+      pdfBtn.innerHTML = original;
+    }
+  });
   results.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
@@ -791,6 +835,10 @@ document.getElementById("run-btn").addEventListener("click", async function () {
   });
   LEDGER_SLOTS.forEach(sl => {
     const r = workbench[`ledgers:${sl.id}`];
+    if (r) files.push([r.name, r.bytes]);
+  });
+  ANNUAL_DOC_SLOTS.forEach(sl => {
+    const r = workbench[`annual_pdfs:${sl.id}`];
     if (r) files.push([r.name, r.bytes]);
   });
   MASTER_SLOTS.forEach(sl => {
