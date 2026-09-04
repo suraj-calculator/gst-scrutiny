@@ -33,6 +33,23 @@ def find_xlsx_files(folder="."):
     return sorted(glob.glob(os.path.join(folder, "*.xlsx")))
 
 
+def normalize_sheet_name(name):
+    """Fold away spacing/case differences so 'b2b, sez, de' and 'b2b,sez,de'
+    (e.g. large-taxpayer-category E-Invoice exports drop the spaces) are
+    treated as the same sheet."""
+    return str(name).replace(" ", "").strip().lower()
+
+
+def find_sheet(wb, canonical_name):
+    """Return the worksheet in wb matching canonical_name, ignoring
+    spacing/case differences. Raises KeyError if none match."""
+    target = normalize_sheet_name(canonical_name)
+    for name in wb.sheetnames:
+        if normalize_sheet_name(name) == target:
+            return wb[name]
+    raise KeyError(f"No sheet matching '{canonical_name}' found. Available: {wb.sheetnames}")
+
+
 def detect_file_type(path):
     """Return 'EINV', 'GSTR1', 'GSTR3B', 'GSTR2B', or None based on sheet-name signature."""
     try:
@@ -40,14 +57,15 @@ def detect_file_type(path):
     except Exception:
         return None
     names = set(wb.sheetnames)
+    normalized = {normalize_sheet_name(n) for n in names}
     wb.close()
     if names == {"GSTR-3B"}:
         return "GSTR3B"
-    if "Read me" in names and "ITC Available" in names:
+    if "Read me" in names and "itcavailable" in normalized:
         return "GSTR2B"
-    if "Read me" in names and "b2cl" in names:
+    if "Read me" in names and "b2cl" in normalized:
         return "GSTR1"
-    if "Read me" in names and "b2b, sez, de" in names:
+    if "Read me" in names and "b2b,sez,de" in normalized:
         return "EINV"
     return None
 
@@ -91,18 +109,11 @@ def warn_duplicates(records):
 
 
 def sheet_max_data_row(ws, min_row):
-    """Last row index (1-based) that has at least one non-empty cell, from min_row onward.
-
-    PERFORMANCE: uses iter_rows(values_only=True) rather than repeated
-    ws[r]/.cell().value access -- openpyxl builds a full Cell wrapper object
-    per access for the latter, which is the dominant cost on a large sheet
-    (measured: a real ~2000-row GSTR-2B 'B2B' sheet spent the bulk of a
-    28s merge step in exactly this kind of cell-by-cell scanning).
-    values_only=True yields plain values directly, skipping that overhead."""
+    """Last row index (1-based) that has at least one non-empty cell, from min_row onward."""
     last = min_row - 1
-    for offset, row in enumerate(ws.iter_rows(min_row=min_row, values_only=True)):
-        if any(v is not None and str(v).strip() != "" for v in row):
-            last = min_row + offset
+    for r in range(min_row, ws.max_row + 1):
+        if any(c.value is not None and str(c.value).strip() != "" for c in ws[r]):
+            last = r
     return last
 
 

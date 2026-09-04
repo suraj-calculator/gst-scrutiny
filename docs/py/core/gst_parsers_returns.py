@@ -252,6 +252,25 @@ def parse_gstr1(path, month):
         rows=list(ws.iter_rows(values_only=True))
         hdr=[str(c).strip() if c else "" for c in rows[3]]
         H={h:i for i,h in enumerate(hdr)}
+        c_gstin, c_invno = H.get("GSTIN/UIN of Recipient"), H.get("Invoice Number")
+        # BUG FIX -- found on real data while chasing a reported false "gap" (invoice
+        # CNN24A000001 appeared to be missing its 18% rate-line from GSTR-1, and the same
+        # pattern independently reported again for ACC24A0007's 12%/18% lines). ROOT CAUSE:
+        # the GST portal's own Excel export for a multi-rate-line invoice leaves GSTIN,
+        # Receiver Name, Invoice Number and Invoice date BLANK on every rate-line after the
+        # first (a merged cell in the source spreadsheet, visually spanning all of that
+        # invoice's rows) -- only Rate/Taxable/tax are populated on those continuation rows.
+        # This loop used to read each row's OWN (blank) Invoice Number/GSTIN cell in
+        # isolation, so every continuation row silently fell into the "blank invoice number"
+        # bucket -- completely disconnected from the invoice it actually belongs to, and
+        # therefore invisible everywhere invoice number mattered (the B2 E-Invoice
+        # comparison above all). Confirmed on this taxpayer's real April data: 5,836 of
+        # 21,493 b2b rows across the FY (27%) are continuation rows of this shape. Fixed by
+        # forward-filling the last SEEN gstin/invno whenever a row's own cells are blank but
+        # its Rate/Taxable cells are populated -- reset to None at the top of every call
+        # (i.e. every month), so this can never carry an invoice identity across a month
+        # boundary.
+        last_gstin, last_invno = None, None
         for r in mpu.rows_for_month(rows, 3, month):
             if not any(r): continue
             out["taxable"]+=num(r[H.get("Taxable Value")])
@@ -259,14 +278,40 @@ def parse_gstr1(path, month):
             out["CGST"]+=num(r[H.get("Central Tax")])
             out["SGST"]+=num(r[H.get("State/UT Tax")])
             out["CESS"]+=num(r[H.get("Cess Amount")])
-            out["b2b_count"]+=1
             irn_i=H.get("IRN")
             if irn_i is None or not str(r[irn_i] if irn_i<len(r) else "").strip():
                 out["b2b_no_irn"]+=1
+            raw_gstin = r[c_gstin] if c_gstin is not None and c_gstin < len(r) else None
+            raw_invno = r[c_invno] if c_invno is not None and c_invno < len(r) else None
+            if raw_gstin not in (None, "") and raw_invno not in (None, ""):
+                # A primary row -- this is where a "new invoice" is actually counted (a
+                # multi-rate invoice's continuation rows are the SAME invoice, not additional
+                # ones; b2b_count is meant to be an invoice count, not a rate-line count).
+                last_gstin = str(raw_gstin).strip()
+                last_invno = str(raw_invno).strip()
+                gstin_key, invno = last_gstin, last_invno
+                out["b2b_count"]+=1
+            elif last_gstin is not None:
+                # A continuation row of the immediately preceding primary row.
+                gstin_key, invno = last_gstin, last_invno
+            else:
+                # No primary row has been seen yet this month -- genuinely can't attribute
+                # this row to an invoice (shouldn't happen in a real export; never crash).
+                gstin_key, invno = "", "None"
             # line-level key for reconciliation
-            invno=str(r[H.get("Invoice Number")]).strip() if H.get("Invoice Number") is not None else "None"
+            # BUG FIX (found during verification of the invoice-level aggregation fix above):
+            # confirmed on real data that the SAME invoice number can legitimately be reused by
+            # this taxpayer's counterparty across TWO DIFFERENT GST registrations of that same
+            # company (e.g. invoice 'CNN24A002674' filed once against the counterparty's
+            # Uttarakhand GSTIN in GSTR-1 and, separately, a different transaction under the same
+            # invoice number against the counterparty's Maharashtra GSTIN in the e-invoice data --
+            # two unrelated transactions that happen to share a number). Keying by invoice number
+            # alone would silently cross-match those two unrelated transactions against each
+            # other. GSTIN is now part of the key; invno stays element [0] so every existing
+            # consumer of these keys elsewhere in this codebase (which reads only k[0]) is
+            # unaffected.
             rate=num(r[H.get("Rate")]) if H.get("Rate") is not None else 0.0
-            k=(invno,rate)
+            k=(invno,gstin_key,rate)
             L=out["lines"].setdefault(k,[0.0,0.0])
             L[0]+=num(r[H.get("Taxable Value")]); L[1]+=num(r[H.get("Integrated Tax")])
             if not invno or invno.lower()=="none":
@@ -559,8 +604,23 @@ def parse_einv(path, month):
         out["cancel_date_col_found"] = canceldate_col is not None
         for r in mpu.rows_for_month(rows, 3, month):
             if not any(r): continue
-            invno=str(r[H.get("Invoice number")]).strip() if H.get("Invoice number") is not None else "None"
+            # BUG FIX (found via a real taxpayer's monthly Comparison sheets showing FALSE
+            # 'line-level gap' mismatches for invoices that genuinely exist in both GSTR-1 and
+            # E-Invoice -- confirmed real, not assumed): this looked up H.get("Invoice number")
+            # (lowercase 'n'), but this file's actual header is "Invoice Number" (capital N) --
+            # confirmed directly against the raw file. Since the lookup never matched, invno fell
+            # back to the LITERAL STRING "None" for EVERY row in EVERY month, not just one
+            # invoice -- meaning the entire 'lines' dict this function builds was keyed under
+            # ("None", rate) instead of real invoice numbers, and every single line-level
+            # comparison in section B2 was comparing against nothing. read_einv_lines (a separate
+            # function, used elsewhere) already tries both capitalisations as fallback candidates
+            # and was unaffected -- this function's own single-candidate lookup was the one place
+            # this broke. Fixed the same way: try both capitalisations, not just one.
+            invno_col = H.get("Invoice Number", H.get("Invoice number"))
+            invno=str(r[invno_col]).strip() if invno_col is not None else "None"
             rate=num(r[H.get("Rate")]) if H.get("Rate") is not None else 0.0
+            gstin_col = H.get("GSTIN/UIN of Recipient", H.get("GSTIN of Recipient"))
+            gstin_key = str(r[gstin_col]).strip() if gstin_col is not None else ""
 
             # FIX (was Bug 1's second half): check cancellation status FIRST. A cancelled
             # e-invoice is correctly ABSENT from GSTR-1 (GSTR-1's own auto-population/deletion
@@ -577,8 +637,17 @@ def parse_einv(path, month):
                     is_cancelled = True
                     out["cancelled"].append(dict(
                         invno=invno, rate=rate,
+                        gstin=gstin_key,
+                        invdate=str(r[H.get("Invoice date")] or "").strip() if H.get("Invoice date") is not None else "",
                         taxable=num(r[H.get("Taxable Value")]) if "Taxable Value" in H else 0.0,
                         igst=num(r[H.get("Integrated Tax")]) if "Integrated Tax" in H else 0.0,
+                        # BUG FIX (reported): only IGST was ever captured here -- CGST/SGST were
+                        # silently dropped from this sheet even though they're read into the
+                        # main totals two lines below. Added, same source columns, same 'or 0'
+                        # graceful-missing-column handling as every other field here.
+                        cgst=num(r[H.get("Central Tax")]) if "Central Tax" in H else 0.0,
+                        sgst=num(r[H.get("State/UT Tax")]) if "State/UT Tax" in H else 0.0,
+                        cess=num(r[H.get("Cess Amount")]) if "Cess Amount" in H else 0.0,
                         irn=str(r[H.get("IRN")] or "").strip() if H.get("IRN") is not None else "",
                         cancel_date=(str(r[canceldate_col]).strip()
                                      if canceldate_col is not None and canceldate_col < len(r) else None),
@@ -593,7 +662,11 @@ def parse_einv(path, month):
             out["SGST"]+=num(r[H.get("State/UT Tax")]) if "State/UT Tax" in H else 0
             out["CESS"]+=num(r[H.get("Cess Amount")]) if "Cess Amount" in H else 0
             out["count"]+=1
-            k=(invno,rate)
+            # BUG FIX -- see the matching comment in parse_gstr1's b2b loop above: GSTIN is now
+            # part of this key too (invno stays element [0] for backward compatibility), so an
+            # invoice number reused by the counterparty across two different GST registrations
+            # of theirs is never cross-matched as if it were one transaction.
+            k=(invno,gstin_key,rate)
             L=out["lines"].setdefault(k,[0.0,0.0])
             L[0]+=num(r[H.get("Taxable Value")]); L[1]+=num(r[H.get("Integrated Tax")])
             ei=H.get("Error in auto-population/ deletion")
@@ -662,12 +735,42 @@ def build_comparisons():
     # summary stays consistent with the line-level section B2. The orphan blank line
     # surfaces as the difference and is detailed in B2.
     if einv.get("available"):
-        note_b2 = "Excludes GSTR-1 blank-invoice-no line(s); see section B2 for line-level detail." if g1.get("blank_invno_lines",0)>0 else ""
+        # TRANSPARENCY FIX (per explicit report: a manual Excel SUM() on the raw E-Invoice file
+        # legitimately gives a BIGGER number than this row, and the gap looked unexplained
+        # without this note): the E-Invoice figure below deliberately EXCLUDES cancelled
+        # e-invoices (their own IRN status = Cancelled, GSTR-1 auto-population status =
+        # Deleted) -- correct, since a cancelled e-invoice genuinely does not appear in GSTR-1
+        # either, and including it would recreate false B2 line-level gaps (the exact bug an
+        # earlier fix already corrected). Confirmed on real data: April has exactly one
+        # cancelled invoice (RBC24A000010, 3 rate-lines) accounting for the entire Rs 14,173.33
+        # taxable / Rs 1,530.00 CGST(=SGST) gap between a raw-file SUM and this row -- this note
+        # makes that reconciliation explicit on the sheet itself instead of requiring a
+        # from-scratch investigation to explain a real, correct exclusion.
+        n_cancelled = len(einv.get("cancelled", []))
+        cancel_note = ""
+        if n_cancelled:
+            cancelled_taxable = sum(c.get("taxable", 0) for c in einv["cancelled"])
+            cancelled_invnos = sorted({c["invno"] for c in einv["cancelled"]})
+            cancel_note = (
+                f"E-Invoice figure EXCLUDES {n_cancelled} cancelled e-invoice line(s) across "
+                f"{len(cancelled_invnos)} invoice(s) ({', '.join(cancelled_invnos[:5])}"
+                f"{'...' if len(cancelled_invnos) > 5 else ''}), totaling Rs {cancelled_taxable:,.2f} "
+                f"taxable -- correctly, since these are also absent from GSTR-1 (see the "
+                f"'Cancelled E-Invoices' sheet). A raw SUM() on the E-Invoice source file itself "
+                f"will be Rs {cancelled_taxable:,.2f} taxable higher than this row for that reason, "
+                f"not a data error.")
+        note_b2 = " ".join(x for x in [
+            "Excludes GSTR-1 blank-invoice-no line(s); see section B2 for line-level detail."
+            if g1.get("blank_invno_lines", 0) > 0 else "",
+            cancel_note] if x)
         C.append(("B. E-Invoice vs GSTR-1","B2B taxable value",
                   "E-Invoice", einv["taxable"], "GSTR-1 B2B (named)", g1["named_taxable"], note_b2))
         C.append(("B. E-Invoice vs GSTR-1","B2B IGST",
                   "E-Invoice", einv["IGST"], "GSTR-1 B2B (named)", g1["named_IGST"], note_b2))
-        note_cs = "Gap in B2B taxable/IGST is an IGST-only (inter-state) line; CGST/SGST unaffected, hence MATCH here." if g1.get("blank_invno_lines",0)>0 else ""
+        note_cs = " ".join(x for x in [
+            "Gap in B2B taxable/IGST is an IGST-only (inter-state) line; CGST/SGST unaffected, hence MATCH here."
+            if g1.get("blank_invno_lines", 0) > 0 else "",
+            cancel_note] if x)
         C.append(("B. E-Invoice vs GSTR-1","B2B CGST",
                   "E-Invoice", einv["CGST"], "GSTR-1 B2B (named)", g1["named_CGST"], note_cs))
         C.append(("B. E-Invoice vs GSTR-1","B2B SGST",
@@ -677,22 +780,50 @@ def build_comparisons():
         C.append(("B. E-Invoice vs GSTR-1","B2B invoices WITHOUT IRN (should be 0)",
                   "Flag", g1["b2b_no_irn"], "Target", 0))
 
-    # ---- B2. E-INVOICE vs GSTR-1 B2B  (LINE-LEVEL, catches total-match hiding line gaps) ----
+    # ---- B2. E-INVOICE vs GSTR-1 B2B  (INVOICE-LEVEL, catches genuine gaps without false-flagging
+    # multi-rate invoices) ----
+    # BUG FIX (per explicit instruction): this used to compare at (invoice, rate) granularity, so
+    # a single invoice legitimately split across multiple rate lines (e.g. one commodity at 12%,
+    # another at 18%, on the SAME invoice) produced a false "LINE-LEVEL GAP" row whenever the two
+    # sources grouped those rate-lines even slightly differently -- one rate-line would show
+    # "GSTR-1: 0" even though the invoice number, and real value, genuinely existed in GSTR-1
+    # under a different rate-line of the SAME invoice. Per instruction: once an invoice number
+    # appears in a source at all, every commodity on it counts as present in that source -- the
+    # correct comparison is INVOICE-LEVEL (every rate-line for that invoice number summed
+    # together), not rate-line-level. Rolled up here from the SAME per-(invoice,rate) 'lines'
+    # dicts built above (not a second, separately-derived read) -- only the GROUPING for this one
+    # comparison changed; every other consumer of g1['lines']/einv['lines'] elsewhere in this
+    # codebase is untouched and still sees the original per-rate-line data.
     if einv.get("available"):
         g1L=g1.get("lines",{}); eiL=einv.get("lines",{})
-        allk=set(g1L)|set(eiL)
+        def _by_invoice(lines_dict):
+            agg = {}
+            for (inv, gstin, rate), v in lines_dict.items():
+                key = (inv, gstin)
+                a = agg.setdefault(key, [0.0, 0.0])
+                a[0] += v[0]; a[1] += v[1]
+            return agg
+        g1_by_inv = _by_invoice(g1L)
+        ei_by_inv = _by_invoice(eiL)
+        # Blank-invoice-number rows are stored under the literal placeholder key "None" (see
+        # parse_gstr1's own invno fallback) -- excluded here since they're already surfaced as
+        # their own dedicated "blank invoice no" finding immediately below; including "None" in
+        # this per-invoice loop would just repeat that same figure under a confusing invoice label.
+        all_inv = {k for k in (set(g1_by_inv) | set(ei_by_inv)) if k[0] != "None"}
         line_mismatch=0
-        for k in sorted(allk, key=lambda x:(str(x[0]),x[1])):
-            a=g1L.get(k,[0.0,0.0]); b=eiL.get(k,[0.0,0.0])
+        for inv, gstin in sorted(all_inv, key=lambda x: (str(x[0]), str(x[1]))):
+            a=g1_by_inv.get((inv,gstin),[0.0,0.0]); b=ei_by_inv.get((inv,gstin),[0.0,0.0])
             if abs(a[0]-b[0])>TOLERANCE or abs(a[1]-b[1])>TOLERANCE:
                 line_mismatch+=1
-                inv,rate=k
-                C.append(("B2. E-Inv vs GSTR-1 (line-level)",
-                          f"Invoice {inv} @ {rate}% - taxable",
-                          "GSTR-1 line", a[0], "E-Invoice line", b[0],
-                          "LINE-LEVEL GAP - present in one source/rate-line not the other; verify invoice."))
+                label = f"Invoice {inv} (GSTIN {gstin})" if gstin else f"Invoice {inv}"
+                C.append(("B2. E-Inv vs GSTR-1 (invoice-level)",
+                          f"{label} - taxable",
+                          "GSTR-1 (all rate-lines)", a[0], "E-Invoice (all rate-lines)", b[0],
+                          "INVOICE-LEVEL GAP - total value for this invoice number differs between "
+                          "the two sources (summed across every tax-rate line on the invoice, for "
+                          "this specific counterparty GSTIN); verify invoice."))
         # blank invoice-number lines in GSTR-1 (orphan taxable lines)
-        C.append(("B2. E-Inv vs GSTR-1 (line-level)",
+        C.append(("B2. E-Inv vs GSTR-1 (invoice-level)",
                   "GSTR-1 taxable lines with BLANK invoice no (should be 0)",
                   "GSTR-1 blank-invno lines", g1.get("blank_invno_lines",0), "Target", 0,
                   "DATA INTEGRITY - taxable value sitting on a line with no invoice number." if g1.get("blank_invno_lines",0)>0 else ""))
@@ -705,11 +836,23 @@ def build_comparisons():
     # produced a wall of false MISMATCH rows (GSTR-3B's real RCM figure vs a fake zero) that
     # look like genuine scrutiny findings but are really just "no data was available to check".
     if not b2b.get("available"):
+        # BUG FIX (found while re-verifying the D-section fix above -- this exact same flaw
+        # predates this session and was never noticed because a taxpayer with GSTR-2B entirely
+        # absent for a month is less common than one with 2B present but no summary sheet):
+        # _comp_rows_iter() (gst_report.py) computes MATCH/MISMATCH purely from the two numeric
+        # values UNLESS an explicit 8th tuple element ("override") is present -- a "SKIPPED" tag
+        # in the 7th element's TEXT is never read for that decision. This tuple was 7 elements,
+        # so a real, non-zero GSTR-3B 3.1(d) RCM figure being compared against a None-turned-0
+        # GSTR-2B value rendered as a false "MISMATCH"/"Critical" row despite saying SKIPPED.
+        # The override is what other rows elsewhere already correctly use for this exact
+        # purpose (see the "EXPLAINED" override a few lines below, and search this file for
+        # other 8-element C.append(...) calls) -- this row just never had it.
         C.append(("C. RCM", "RCM liability vs GSTR-2B", "GSTR-3B 3.1(d)", gv("3.1d", 1),
                   "GSTR-2B", None,
                   f"SKIPPED -- GSTR-2B not supplied for this month "
                   f"({b2b.get('_reason', 'no reason recorded')}). RCM/ITC checks C, D, D2 all "
-                  "skipped for this month; this is a data-availability gap, not a mismatch."))
+                  "skipped for this month; this is a data-availability gap, not a mismatch.",
+                  "SKIPPED"))
     else:
         # BUG FIX: the CGST/SGST rows already correctly carried "SCOPE DIFF - Expected" (3.1(d)
         # legitimately includes unregistered-supplier/import-of-service RCM, which 2B
@@ -754,12 +897,16 @@ def build_comparisons():
         ov_i, tag_i = _rcm_row("IGST", gv("3.1d", 1), b2b["ITC_rcm_IGST"], 0)
         ov_c, tag_c = _rcm_row("CGST", gv("3.1d", 2), b2b["ITC_rcm_CGST"], 1)
         ov_s, tag_s = _rcm_row("SGST", gv("3.1d", 3), b2b["ITC_rcm_SGST"], 2)
+        _rcm_fallback_note = (" [GSTR-2B RCM figure computed directly from B2B invoice-level "
+                              "data (Reverse Charge = Y rows, ITC Availability Yes/Unconfirmed) "
+                              "-- this taxpayer's GSTR-2B export has no summary sheet to read it "
+                              "from directly.]" if b2b.get("_summary_computed_from_invoice_level") else "")
         C.append(("C. RCM", "RCM liability IGST (3.1d vs 2B-avail)",
-                  "GSTR-3B 3.1(d)", gv("3.1d", 1), "GSTR-2B RCM", b2b["ITC_rcm_IGST"], tag_i, ov_i))
+                  "GSTR-3B 3.1(d)", gv("3.1d", 1), "GSTR-2B RCM", b2b["ITC_rcm_IGST"], tag_i + _rcm_fallback_note, ov_i))
         C.append(("C. RCM", "RCM liability CGST",
-                  "GSTR-3B 3.1(d)", gv("3.1d", 2), "GSTR-2B RCM", b2b["ITC_rcm_CGST"], tag_c, ov_c))
+                  "GSTR-3B 3.1(d)", gv("3.1d", 2), "GSTR-2B RCM", b2b["ITC_rcm_CGST"], tag_c + _rcm_fallback_note, ov_c))
         C.append(("C. RCM", "RCM liability SGST",
-                  "GSTR-3B 3.1(d)", gv("3.1d", 3), "GSTR-2B RCM", b2b["ITC_rcm_SGST"], tag_s, ov_s))
+                  "GSTR-3B 3.1(d)", gv("3.1d", 3), "GSTR-2B RCM", b2b["ITC_rcm_SGST"], tag_s + _rcm_fallback_note, ov_s))
 
         # "RCM ITC claimed IGST (4A3 vs 2B)" -- same underlying scope reason: ITC on RCM already
         # correctly self-assessed and PAID is claimable regardless of whether the supplier was
@@ -768,10 +915,46 @@ def build_comparisons():
         # test, reusing the IGST liability row's own result (they're driven by the same fact).
         ov_43, tag_43 = _rcm_row("IGST (4A3)", gv("4A3", 0), b2b["ITC_rcm_IGST"], 3)
         C.append(("C. RCM", "RCM ITC claimed IGST (4A3 vs 2B)",
-                  "GSTR-3B 4(A)(3)", gv("4A3", 0), "GSTR-2B RCM", b2b["ITC_rcm_IGST"], tag_43, ov_43))
+                  "GSTR-3B 4(A)(3)", gv("4A3", 0), "GSTR-2B RCM", b2b["ITC_rcm_IGST"], tag_43 + _rcm_fallback_note, ov_43))
 
     # ---- D. ITC: GSTR-3B 4(A)(5) vs GSTR-2B (net of credit notes) ----
-    if b2b.get("available"):
+    # BUG FIX (reported: "D. ITC (All other)" showing GSTR-2B gross/net/net-of-CN as 0 and
+    # flagging a mismatch against GSTR-3B in every month): this used to gate on
+    # b2b.get("available") -- the BROAD "was GSTR-2B supplied for this month at all" flag,
+    # which is correctly True for this taxpayer (their 2B genuinely is supplied and its
+    # invoice-level B2B/B2B-CDNR data is fully read). But ITC_all_other_IGST/CGST/SGST and
+    # CN_IGST/CGST/SGST below come SPECIFICALLY from the 'ITC Available' summary/control-total
+    # sheet's own Table 3 -- a sheet this taxpayer's document-wise GSTR-2B export doesn't carry
+    # at all (confirmed: their export has only B2B/B2B-CDNR, nothing else). When that sheet is
+    # absent, summary_for_month() deliberately zero-fills these specific fields and records the
+    # real state separately under b2b['_summary_available']=False (see that function's own
+    # docstring) -- exactly so a caller can tell "genuinely zero" apart from "not computable
+    # from this file". This section was never updated to check that narrower flag (three OTHER
+    # callers elsewhere in this codebase -- gst_checks_flow.py, gst_checks_monthly.py,
+    # master_build.py -- already do), so it was comparing GSTR-3B's real 4(A)(5)/4(B)(2) figures
+    # against a fabricated zero every month, for every taxpayer whose 2B export has no summary
+    # sheet. Confirmed on real April data: available=True, _summary_available=False,
+    # ITC_all_other_IGST=0.0 (fabricated) before this fix.
+    # ---- D. ITC: GSTR-3B 4(A)(5) vs GSTR-2B (net of credit notes) ----
+    # BUG FIX (reported: "D. ITC (All other)" showing GSTR-2B gross/net/net-of-CN as 0 and
+    # flagging a mismatch against GSTR-3B in every month), THEN EXTENDED (per explicit
+    # instruction) to compute a real answer instead of skipping: ITC_all_other_IGST/CGST/SGST
+    # and CN_IGST/CGST/SGST normally come from the 'ITC Available' summary/control-total
+    # sheet's own Table 3 -- a sheet this taxpayer's document-wise GSTR-2B export doesn't carry
+    # at all (confirmed: their export has only B2B/B2B-CDNR, nothing else). Per instruction,
+    # that sheet's own figures are themselves nothing more than a sum of the SAME B2B rows
+    # this tool already reads (grouped by each row's own ITC Availability column), so
+    # summary_for_month() now computes the identical figure directly from the invoice-level
+    # B2B/B2B-CDNR data whenever the summary sheet itself is absent (see that function's own
+    # fallback, flagged via b2b['_summary_computed_from_invoice_level']) -- this section only
+    # needs to gate on whether a real number exists at all, from either source, not on which
+    # one it came from.
+    if b2b.get("ITC_all_other_IGST") is not None:
+        _fallback_note = (" [Computed directly from B2B/B2B-CDNR invoice-level data, grouped by "
+                          "each row's own ITC Availability status -- this taxpayer's GSTR-2B "
+                          "export has no 'ITC Available'/'ITC not available' summary sheet to "
+                          "read this from directly.]"
+                          if b2b.get("_summary_computed_from_invoice_level") else "")
         net2b_igst = b2b["ITC_all_other_IGST"] - b2b["CN_IGST"]
         net2b_cgst = b2b["ITC_all_other_CGST"] - b2b["CN_CGST"]
         net2b_sgst = b2b["ITC_all_other_SGST"] - b2b["CN_SGST"]
@@ -800,15 +983,15 @@ def build_comparisons():
                        f"of claiming gross and reversing separately in 4(B)(2); 3B 4(A)(5) "
                        f"{head} {threeb:,.2f} = GSTR-2B gross {head} {gross_vals[head]:,.2f} - "
                        f"GSTR-2B CN {head} {(gross_vals[head]-net2b):,.2f}, exact tie-out to the "
-                       f"'NET of CN' row below. Net ITC is correct either way.")
+                       f"'NET of CN' row below. Net ITC is correct either way.") + _fallback_note
             else:
                 override = None
                 tag = ("TO BE EXPLAINED - gap may be prev-period carryforward/provisional ITC; "
-                       "not auto-ineligible." if head == "IGST" else "")
+                       "not auto-ineligible." if head == "IGST" else "") + _fallback_note
             C.append(("D. ITC (All other)", f"ITC {head} (3B 4A5 vs 2B gross)",
                       "GSTR-3B 4(A)(5)", threeb, "GSTR-2B (gross)", gross_vals[head], tag, override))
             C.append((f"D. ITC (All other)", f"ITC {head} (3B 4A5 vs 2B NET of CN)",
-                      "GSTR-3B 4(A)(5)", threeb, "GSTR-2B (net CN)", net2b))
+                      "GSTR-3B 4(A)(5)", threeb, "GSTR-2B (net CN)", net2b, _fallback_note))
 
         # ---- D2. ITC reversal: 3B 4(B)(2) vs 2B credit notes ----
         # For any head where D's netting identity is confirmed THIS month, 4(B)(2) is proven to
@@ -853,10 +1036,20 @@ def build_comparisons():
                 C.append((f"D2. ITC Reversal", f"Reversal {head} (3B 4B2 vs 2B CN)",
                           "GSTR-3B 4(B)(2)", four_b2[head], "GSTR-2B CN", cn_vals[head]))
     else:
+        # Reachable only when GSTR-2B is genuinely not supplied at all this month (available=
+        # False) -- the "2B supplied but no summary sheet" sub-case that used to land here is
+        # now fully handled by the fallback computation above (b2b['ITC_all_other_IGST'] is
+        # never None whenever B2B/B2B-CDNR invoice-level data exists), so this branch no longer
+        # needs to distinguish the two.
+        reason = "SKIPPED -- GSTR-2B not supplied for this month (see section C note above)."
+        # BUG FIX: see the identical fix and explanation on the Section C "not supplied" tuple
+        # above -- this pair of tuples was missing the 8th "override" element too, so both rows
+        # rendered as false MISMATCH/Critical despite the SKIPPED text, whenever GSTR-3B's own
+        # 4(A)(5)/4(B)(2) figures were non-zero (i.e. almost always).
         C.append(("D. ITC (All other)", "ITC vs GSTR-2B", "GSTR-3B 4(A)(5)", gv("4A5", 0),
-                  "GSTR-2B", None, "SKIPPED -- GSTR-2B not supplied for this month (see section C note above)."))
+                  "GSTR-2B", None, reason, "SKIPPED"))
         C.append(("D2. ITC Reversal", "Reversal vs GSTR-2B CN", "GSTR-3B 4(B)(2)", gv("4B2", 0),
-                  "GSTR-2B", None, "SKIPPED -- GSTR-2B not supplied for this month (see section C note above)."))
+                  "GSTR-2B", None, reason, "SKIPPED"))
 
     return C, dict(g1=g1, g3b=g3b, einv=einv, b2b=b2b)
 
@@ -1129,6 +1322,97 @@ def _normalize_2b_row_period(tag):
     return f"{m.group(1).title()}-{m.group(2)}"
 
 
+_2B_PERIOD_TAG_RE = re.compile(r"^[A-Za-z]{3}'\d{2}$")
+
+
+def _date_to_2b_period(v):
+    """Best-effort fallback: derive a 'Mon-YY' period tag from a raw DATE value (string
+    'DD/MM/YYYY' or a native date/datetime cell) -- used only when a CDNR row's own period-tag
+    column can't be resolved even after the rate-shift check. Confirmed real and needed: on one
+    taxpayer's real export, 580 B2B-CDNR rows had an unresolvable period tag, and every one
+    checked had a genuinely valid, parseable Note Date sitting right there -- e.g. several rows
+    tagged nowhere resolved cleanly to 'Sep-23' once read from this column instead. Falling back
+    to the date (matching how E-Way Bill rows already derive their own month, from ewbdate) is a
+    real, grounded recovery, not a guess -- it uses a second column this same row actually has,
+    not an inferred/estimated value. None if the date cell itself can't be parsed either -- the
+    caller still skips in that case, never assigning a row to a month it can't support."""
+    if v is None:
+        return None
+    if isinstance(v, (_dt.date, _dt.datetime)):
+        d = v
+    else:
+        m = re.search(r"(\d{2})/(\d{2})/(\d{4})", str(v))
+        if not m:
+            return None
+        dd, mm, yyyy = m.groups()
+        try:
+            d = _dt.date(int(yyyy), int(mm), int(dd))
+        except ValueError:
+            return None
+    return f"{MONTH_ABBR.get(d.month, '?')}'{str(d.year)[2:]}"
+
+
+_STANDARD_GST_RATES = {0.0, 0.1, 0.25, 1.0, 1.5, 3.0, 5.0, 6.0, 7.5, 12.0, 18.0, 28.0, 40.0}
+
+
+def _looks_like_gst_rate(rv):
+    """True only if rv is close to one of the actual, fixed set of GST rate values India uses
+    -- NOT just 'any small number'. BUG FIX (found immediately after the first version of this
+    check went live): a small TAXABLE VALUE (e.g. Rs 31.63 on a small debit note) is
+    numerically indistinguishable from a plausible rate under a bare '0 <= rv <= 40' range
+    check -- confirmed real: that looser check mis-classified a real Rs 31.63 taxable-value row
+    as an unshifted rate, breaking the very shift detection this exists for. Checking against
+    the actual known rate set (with a small epsilon for float rounding) is specific enough that
+    a genuine taxable value essentially never coincides with one by chance."""
+    if not isinstance(rv, (int, float)) or isinstance(rv, bool):
+        return False
+    return any(abs(rv - std) < 0.01 for std in _STANDARD_GST_RATES)
+
+
+def _2b_row_rate_shift(r, c_period, c_rate=None):
+    """BUG FIX (found on a real taxpayer's export, not assumed): confirmed 54% of that
+    taxpayer's real B2B rows have a genuinely BLANK 'Rate(%)' cell -- not a missing column in
+    the sheet's own layout (the header has one), just that specific rows' data doesn't populate
+    it. Every column from Rate(%) onward (Taxable Value, IGST, CGST, SGST, Cess, Period, Filing
+    Date, ITC Availability, Reason) then sits ONE POSITION EARLIER than the header-computed
+    index for THAT ROW ONLY -- confirmed by direct comparison of several shifted vs normal rows
+    side by side. Reading every row at the same fixed index (the header-only approach used
+    before this fix) would have silently misread the period, tax amounts, and ITC availability
+    for well over half of this taxpayer's real invoices -- far worse than the prior hard crash,
+    since it would have looked like it worked.
+
+    REVISED DETECTION (found necessary after further real-data testing -- the period-tag-only
+    check below was insufficient on its own): some real CDNR rows have ADDITIONAL misalignment
+    beyond Rate alone (several more consecutive blank cells further into the row), which pushes
+    the period tag somewhere the simple 'c_period or c_period-1' check never looks -- so that
+    check alone silently fell back to shift=0 and misread the TAX AMOUNTS too, not just missed
+    the period (confirmed on a real row: NoteValue = Taxable+Tax reconciled EXACTLY under -1
+    shift and did not reconcile at all under the shift=0 the old check produced). Fixed to check
+    the Rate(%) cell's own value FIRST, when the caller can supply its column index: a genuine
+    GST rate is always a small number (realistically 0-28, never above 40); if that cell is
+    blank or holds something far too large to be a rate (i.e. it's actually holding the taxable
+    value because Rate itself is missing), shift is -1 regardless of what the period tag's
+    position looks like. Falls back to the old period-tag-position check only when c_rate isn't
+    supplied by the caller.
+
+    Returns 0 (normal) or -1 (shifted -- caller should read every column from Rate(%) onward at
+    index-1, and treat Rate(%) itself as unavailable for that row, since it's genuinely missing,
+    not misplaced)."""
+    if c_rate is not None and c_rate < len(r):
+        rv = r[c_rate]
+        if _looks_like_gst_rate(rv):
+            return 0
+        return -1
+    v = r[c_period] if c_period < len(r) else None
+    if isinstance(v, str) and _2B_PERIOD_TAG_RE.match(v.strip()):
+        return 0
+    if c_period > 0:
+        v_prev = r[c_period - 1] if (c_period - 1) < len(r) else None
+        if isinstance(v_prev, str) and _2B_PERIOD_TAG_RE.match(v_prev.strip()):
+            return -1
+    return 0
+
+
 _2B_SUMMARY_GROUP_WIDTH = 4  # IGST, CGST, SGST, CESS -- one column-group's width
 
 
@@ -1374,42 +1658,78 @@ def _read_cdnra_amendments(wb):
     return superseded, out_by_month
 
 
-_2B_FILE_CACHE = {}
+def parse_2b_excel(path, month):
+    """Return dict(summary=..., b2b=[...], cdnr=[...], available=True) for ONE
+    month out of the merged (whole-FY) GSTR-2B workbook.
 
-
-def _load_2b_file_data(path):
-    """The expensive, MONTH-INDEPENDENT half of parsing a merged (whole-FY)
-    GSTR-2B workbook: one load_workbook() call, one full scan each of
-    'ITC Available' / 'B2B' / 'B2B-CDNR' / 'B2BA' / 'B2B-CDNRA', with B2B and
-    B2B-CDNR rows indexed by their OWN period column into {month: [rows]}
-    dicts (amendment rows spliced in per month exactly as parse_2b_excel
-    always did, just computed once instead of per call).
-
-    PERFORMANCE: parse_2b_excel(path, month) is called once per month from
-    TWO call sites in master_build.py (summary_for_month() inside the main
-    per-month loop, and the FY-wide 2B invoice index) -- 24 calls in a
-    typical 12-month run, all against the exact same file. It used to redo
-    this entire load+scan from scratch every single call. Measured against
-    real full-year data: this was the dominant cost of a run that otherwise
-    timed out. Caching here, keyed by path, means the file is actually read
-    once; every parse_2b_excel() call after the first is a cheap dict
-    lookup. A failed parse is never cached, so a genuinely broken file still
-    fails on every call, matching the original behaviour (see below)."""
-    if path in _2B_FILE_CACHE:
-        return _2B_FILE_CACHE[path]
-
+    B2B and B2B-CDNR include amendment-adjusted figures (bug report §7): a
+    row superseded by a later B2BA/B2B-CDNRA entry is excluded wherever its
+    stale original sits, and the amendment's own revised row is spliced in
+    under the amendment's own filing period instead -- see
+    _read_b2ba_amendments()/_read_cdnra_amendments() for why both halves of
+    that (exclude AND re-add, not just add) are necessary."""
+    if not path or not os.path.exists(path) or not path.lower().endswith((".xlsx", ".xlsm")):
+        raise mpu.PeriodParseError(f"Not a GSTR-2B Excel file: {path!r}")
     wb = openpyxl.load_workbook(path, data_only=True)
 
+    # ---------- Summary (Table 3), quarter-block-scoped ----------
+    # BUG FIX (found on a real taxpayer's export): this used to raise a FATAL error if 'ITC
+    # Available' was missing, which blocked ALL invoice-level B2B/B2B-CDNR parsing too -- even
+    # though those are structurally independent (each B2B/CDNR row carries its own period
+    # column; nothing about parsing them needs the 'ITC Available' sheet's marker blocks,
+    # confirmed by reading the rest of this function). Some real GSTR-2B exports genuinely only
+    # carry 'B2B'/'B2B-CDNR' and nothing else (confirmed: one real taxpayer's file had exactly
+    # those two sheets, no 'ITC Available', no 'Read me', no B2BA/ECO/ISD/IMPG at all) -- for
+    # that shape of file, invoice-level parsing (which is what every real check in this tool
+    # actually uses -- see the docstring's own note that the summary is shown only as a control
+    # total) should still work. Now: if 'ITC Available' is missing, the summary degrades to an
+    # explicit not-available marker (matching the exact shape build_itc_3b_vs_2b's F7a already
+    # expects and handles -- summary['available']=False skips the control-total comparison
+    # instead of comparing against a fabricated zero) and B2B/CDNR parsing proceeds normally.
     if "ITC Available" not in wb.sheetnames:
-        raise mpu.PeriodParseError(f"'ITC Available' sheet not found in {path!r}")
-    itc_rows = list(wb["ITC Available"].iter_rows(values_only=True))
+        summary = dict(
+            ITC_all_other_IGST=0.0, ITC_all_other_CGST=0.0, ITC_all_other_SGST=0.0, ITC_all_other_CESS=0.0,
+            ITC_rcm_IGST=0.0, ITC_rcm_CGST=0.0, ITC_rcm_SGST=0.0, ITC_rcm_CESS=0.0,
+            CN_IGST=0.0, CN_CGST=0.0, CN_SGST=0.0, CN_CESS=0.0,
+            _qtr_total_mismatch=None, available=False,
+            _reason="'ITC Available' sheet not present in this GSTR-2B export -- summary "
+                    "control-total not computable from this file; invoice-level B2B/B2B-CDNR "
+                    "figures below are unaffected and are what every real check in this tool uses.",
+        )
+    else:
+        ws = wb["ITC Available"]
+        rows = list(ws.iter_rows(values_only=True))
+        start, end, group_index, group_count = mpu.find_block_and_index_for_month(rows, month)
+        summary = _summary_from_block(rows[start:end], group_index=group_index, group_count=group_count)
 
     # ---------- amendment indices (whole-file, not month-scoped -- bug report §7) ----------
     superseded_inv, b2ba_by_month = _read_b2ba_amendments(wb)
     superseded_note, cdnra_by_month = _read_cdnra_amendments(wb)
 
-    # ---------- B2B invoice list, indexed by each row's OWN period column ----------
-    b2b_by_month = {}
+    # ---------- B2B invoice list, scoped by the MARKER BLOCK for `month` ----------
+    # BUG FIX (bug report #1, ITC Annual Summary wrong every month -- confirmed on real data):
+    # this used to filter the WHOLE sheet (every month's rows at once) by matching each row's
+    # own 'GSTR-1/IFF/GSTR-5 Period' column against `month` -- i.e. it trusted the INVOICE's
+    # own reporting period, not which 2B statement (merged-file marker block) the row actually
+    # sits under. That is wrong for "ITC available in 2B this month": Rule 36(4)/Sec 16(2)(aa)
+    # eligibility is governed by which of the RECIPIENT's own monthly 2B statements first shows
+    # the invoice, not by the invoice's own original filing period -- a March invoice the
+    # supplier files late, that only appears in the recipient's April 2B, is available to the
+    # recipient in April, not March. Confirmed on this taxpayer's real April 2B: 52 rows
+    # genuinely present in April's own downloaded 2B (physically under the April marker block)
+    # carry an internal period tag of "Mar'23" and were being silently DROPPED from every month
+    # in this FY (Mar-23 isn't even a valid month in an Apr-23..Mar-24 FY, so a row tagged that
+    # way could never match ANY month query) -- while 43 rows physically sitting in a LATER
+    # month's block (tagged "Apr'23" internally, e.g. a correction reported the following month)
+    # were being pulled INTO April's figures instead of counting toward the month they actually
+    # appeared in. Net effect on April alone: understated 2B-available ITC by Rs 21,366.02 --
+    # confirmed against a manual invoice-by-invoice count of the raw April file (1222 rows, 1
+    # "No"/1221 "Yes", matching exactly). Fixed: scope to the marker block for `month` (i.e.
+    # exactly the rows physically present in that month's own downloaded 2B file, matching a
+    # manual count of that file), never re-filtered by the row's own internal period tag. The
+    # per-row period is still read into `filed_period` below (best-effort) as reference data --
+    # useful for spotting late-reported invoices -- but no longer gates inclusion.
+    b2b = []
     if "B2B" in wb.sheetnames:
         ws_b2b = wb["B2B"]
         hmap = _2b_header_map(ws_b2b)
@@ -1421,7 +1741,7 @@ def _load_2b_file_data(path):
         c_invval = _2b_col_contains(hmap, "invoicevalue")
         c_pos = _2b_col_exact(hmap, "Place of supply")
         c_rcm = _2b_col_contains(hmap, "reversecharge")
-        c_rate = _2b_col_contains(hmap, "taxrate")
+        c_rate = _2b_col_exact(hmap, "Rate(%)")
         c_taxable = _2b_col_contains(hmap, "taxablevalue")
         c_igst = _2b_col_exact(hmap, "Integrated Tax")
         c_cgst = _2b_col_exact(hmap, "Central Tax")
@@ -1434,10 +1754,18 @@ def _load_2b_file_data(path):
             raise mpu.PeriodParseError(
                 f"Could not locate the GSTR-1/IFF/GSTR-5 filing-period column by header text in "
                 f"the 'B2B' sheet of {path!r} -- the column layout may have changed again.")
-        for r in _data_rows(ws_b2b):
+        all_rows_b2b = list(ws_b2b.iter_rows(values_only=True))
+        blk_start, blk_end = mpu.find_block_for_month(all_rows_b2b, month)
+        for r in all_rows_b2b[blk_start:blk_end]:
             if not any(r) or not r[0] or mpu.is_marker_row(r):
                 continue
-            row_month = _normalize_2b_row_period(r[c_period] if c_period < len(r) else None)
+            shift = _2b_row_rate_shift(r, c_period, c_rate)
+            eff_period_col = c_period + shift
+            try:
+                filed_period = _normalize_2b_row_period(
+                    r[eff_period_col] if eff_period_col < len(r) else None)
+            except mpu.PeriodParseError:
+                filed_period = None
             gstin_val = _2b_g(r, c_gstin)
             invno_val = _2b_g(r, c_invno)
             if (gstin_val, invno_val.strip().upper()) in superseded_inv:
@@ -1445,23 +1773,32 @@ def _load_2b_file_data(path):
                 # figure for it, spliced in below under the AMENDMENT's own period) -- counting
                 # this stale row too would double-count the invoice. See _read_b2ba_amendments().
                 continue
-            b2b_by_month.setdefault(row_month, []).append(dict(
+            b2b.append(dict(
                 gstin=gstin_val, supplier=_2b_g(r, c_supplier),
                 invno=invno_val, invtype=_2b_g(r, c_invtype),
                 date=_2b_g(r, c_date), invval=_2b_gn(r, c_invval),
                 pos=_2b_g(r, c_pos), rcm=_2b_g(r, c_rcm),
-                rate=_2b_gn(r, c_rate), taxable=_2b_gn(r, c_taxable),
-                igst=_2b_gn(r, c_igst), cgst=_2b_gn(r, c_cgst), sgst=_2b_gn(r, c_sgst),
-                cess=_2b_gn(r, c_cess),
-                itc_avail=_2b_g(r, c_itcavail), itc_avail_reason=_2b_g(r, c_reason),
-                via_amendment=False,
+                rate=(None if shift else _2b_gn(r, c_rate)),
+                taxable=_2b_gn(r, c_taxable + shift),
+                igst=_2b_gn(r, c_igst + shift), cgst=_2b_gn(r, c_cgst + shift), sgst=_2b_gn(r, c_sgst + shift),
+                cess=_2b_gn(r, c_cess + shift),
+                itc_avail=_2b_g(r, c_itcavail + shift), itc_avail_reason=_2b_g(r, c_reason + shift),
+                filed_period=filed_period, via_amendment=False,
             ))
-    # splice in each month's amended (revised) invoice rows -- see _read_b2ba_amendments()
-    for amend_month, amend_rows in b2ba_by_month.items():
-        b2b_by_month.setdefault(amend_month, []).extend(amend_rows)
+    # splice in this month's amended (revised) invoice rows -- see _read_b2ba_amendments()
+    b2b.extend(b2ba_by_month.get(month, []))
 
-    # ---------- B2B-CDNR (credit/debit notes), same per-row period indexing ----------
-    cdnr_by_month = {}
+    # ---------- B2B-CDNR (credit/debit notes), scoped by the MARKER BLOCK for `month` ----------
+    # BUG FIX (bug report #1, same root cause as B2B above): rows are now scoped to the marker
+    # block for `month` (i.e. exactly what's physically in that month's own downloaded 2B file),
+    # never re-filtered by the row's own internal period tag. The period-tag/date-fallback logic
+    # below is KEPT, but repurposed: it now only fills `filed_period` for reference (useful for
+    # spotting a note reported under a different period than the 2B statement it appears in) and
+    # feeds `cdnr_skipped` as an informational data-quality count -- it no longer excludes the
+    # row from this month's totals, since the row's inclusion is now decided by the marker block
+    # it's physically in, not by whether its own period tag could be read.
+    cdnr = []
+    cdnr_skipped = 0
     if "B2B-CDNR" in wb.sheetnames:
         ws_cdnr = wb["B2B-CDNR"]
         hmap2 = _2b_header_map(ws_cdnr)
@@ -1473,71 +1810,68 @@ def _load_2b_file_data(path):
         d_date = _2b_col_exact(hmap2, "Note date")
         d_noteval = _2b_col_contains(hmap2, "notevalue")
         d_pos = _2b_col_exact(hmap2, "Place of supply")
-        d_rate = _2b_col_contains(hmap2, "taxrate")
+        d_rate = _2b_col_exact(hmap2, "Rate(%)")
         d_taxable = _2b_col_contains(hmap2, "taxablevalue")
         d_igst = _2b_col_exact(hmap2, "Integrated Tax")
         d_cgst = _2b_col_exact(hmap2, "Central Tax")
         d_sgst = _2b_col_contains(hmap2, "stateut")
         d_cess = _2b_col_exact(hmap2, "Cess")
         d_period = _2b_col_contains(hmap2, "period")
+        d_itcavail = _2b_col_exact(hmap2, "ITC Availability")
+        d_reason = _2b_col_exact(hmap2, "Reason")
         if d_period is None:
             raise mpu.PeriodParseError(
                 f"Could not locate the GSTR-1/IFF/GSTR-5 filing-period column by header text in "
                 f"the 'B2B-CDNR' sheet of {path!r} -- the column layout may have changed again.")
-        for r in _data_rows(ws_cdnr):
+        all_rows_cdnr = list(ws_cdnr.iter_rows(values_only=True))
+        blk_start, blk_end = mpu.find_block_for_month(all_rows_cdnr, month)
+        for r in all_rows_cdnr[blk_start:blk_end]:
             if not any(r) or not r[0] or mpu.is_marker_row(r):
                 continue
-            row_month = _normalize_2b_row_period(r[d_period] if d_period < len(r) else None)
+            shift = _2b_row_rate_shift(r, d_period, d_rate)
+            eff_period_col = d_period + shift
+            v = r[eff_period_col] if eff_period_col < len(r) else None
+            if not (isinstance(v, str) and _2B_PERIOD_TAG_RE.match(v.strip())):
+                # Some B2B-CDNR rows have a MORE complex misalignment than the B2B sheet's clean
+                # 'Rate(%) missing, shift everything else by one' pattern -- the period tag isn't
+                # sitting where shift alone would put it. Try recovering it from this row's own
+                # Note Date column instead (same fallback as before this fix); this is now only
+                # used to populate the reference field below, not to decide inclusion.
+                v_from_date = _date_to_2b_period(r[d_date] if d_date is not None and d_date < len(r) else None)
+                v = v_from_date if v_from_date else None
+            if v is None:
+                cdnr_skipped += 1
+                filed_period = None
+            else:
+                try:
+                    filed_period = _normalize_2b_row_period(v)
+                except mpu.PeriodParseError:
+                    filed_period = None
             gstin_val = _2b_g(r, d_gstin)
             note_val = _2b_g(r, d_note)
             if (gstin_val, note_val.strip().upper()) in superseded_note:
                 # Superseded by a later B2B-CDNRA entry -- see _read_cdnra_amendments().
                 continue
-            cdnr_by_month.setdefault(row_month, []).append(dict(
+            cdnr.append(dict(
                 gstin=gstin_val, supplier=_2b_g(r, d_supplier),
                 note=note_val, ntype=_2b_g(r, d_ntype),
                 supplytype=_2b_g(r, d_supplytype), date=_2b_g(r, d_date),
                 noteval=_2b_gn(r, d_noteval), pos=_2b_g(r, d_pos),
-                rate=_2b_gn(r, d_rate), taxable=_2b_gn(r, d_taxable),
-                igst=_2b_gn(r, d_igst), cgst=_2b_gn(r, d_cgst), sgst=_2b_gn(r, d_sgst),
-                cess=_2b_gn(r, d_cess),
-                via_amendment=False,
+                rate=(None if shift else _2b_gn(r, d_rate)),
+                taxable=_2b_gn(r, d_taxable + shift),
+                igst=_2b_gn(r, d_igst + shift), cgst=_2b_gn(r, d_cgst + shift), sgst=_2b_gn(r, d_sgst + shift),
+                cess=_2b_gn(r, d_cess + shift),
+                itc_avail=(_2b_g(r, d_itcavail + shift) if d_itcavail is not None else ""),
+                itc_avail_reason=(_2b_g(r, d_reason + shift) if d_reason is not None else ""),
+                filed_period=filed_period, via_amendment=False,
             ))
-    # splice in each month's amended (revised) note rows -- see _read_cdnra_amendments()
-    for amend_month, amend_rows in cdnra_by_month.items():
-        cdnr_by_month.setdefault(amend_month, []).extend(amend_rows)
+    # splice in this month's amended (revised) note rows -- see _read_cdnra_amendments()
+    cdnr.extend(cdnra_by_month.get(month, []))
 
-    data = dict(itc_rows=itc_rows, b2b_by_month=b2b_by_month, cdnr_by_month=cdnr_by_month)
-    _2B_FILE_CACHE[path] = data
-    return data
-
-
-def parse_2b_excel(path, month):
-    """Return dict(summary=..., b2b=[...], cdnr=[...], available=True) for ONE
-    month out of the merged (whole-FY) GSTR-2B workbook.
-
-    B2B and B2B-CDNR include amendment-adjusted figures (bug report §7): a
-    row superseded by a later B2BA/B2B-CDNRA entry is excluded wherever its
-    stale original sits, and the amendment's own revised row is spliced in
-    under the amendment's own filing period instead -- see
-    _read_b2ba_amendments()/_read_cdnra_amendments() for why both halves of
-    that (exclude AND re-add, not just add) are necessary.
-
-    The actual file reading is cached (once per path) by _load_2b_file_data()
-    -- see its docstring; this function just does the cheap per-month lookup
-    into that cached, already-indexed data."""
-    if not path or not os.path.exists(path) or not path.lower().endswith((".xlsx", ".xlsm")):
-        raise mpu.PeriodParseError(f"Not a GSTR-2B Excel file: {path!r}")
-
-    data = _load_2b_file_data(path)
-
-    start, end, group_index, group_count = mpu.find_block_and_index_for_month(data["itc_rows"], month)
-    summary = _summary_from_block(data["itc_rows"][start:end], group_index=group_index, group_count=group_count)
-    summary["available"] = True
-
-    b2b = list(data["b2b_by_month"].get(month, []))
-    cdnr = list(data["cdnr_by_month"].get(month, []))
-
+    # Only defaults to True if not already explicitly set (the 'ITC Available' sheet missing
+    # branch above sets it to False and must not be clobbered back to True here).
+    summary.setdefault("available", True)
+    summary["cdnr_skipped_unparseable_this_month"] = cdnr_skipped
     return dict(summary=summary, b2b=b2b, cdnr=cdnr, available=True)
 
 
@@ -1581,9 +1915,66 @@ def summary_for_month(path, month):
         s["_lines"] = None
         return s
     s = dict(parsed["summary"])
+    # BUG FIX (found via a real taxpayer's monthly sheets all wrongly saying "GSTR-2B not
+    # supplied" despite a full, correctly-parsed GSTR-2B Excel being supplied for the whole
+    # year): parsed['summary']['available'] is a NARROWER flag added later -- it means
+    # specifically 'the ITC Available summary/control-total sheet could not be read' (some real
+    # GSTR-2B exports genuinely lack that sheet while still carrying full B2B/B2B-CDNR
+    # invoice-level data -- see parse_2b_excel's own docstring). Blindly copying that narrower
+    # flag into s['available'] made every caller that reads THIS function's own 'available' key
+    # for the ORIGINAL, broader question -- 'was GSTR-2B supplied for this month at all' --
+    # wrongly conclude it wasn't, even though b2b/cdnr rows were sitting right there, correctly
+    # parsed. Fixed: s['available'] now reflects whether parse_2b_excel succeeded at all (True
+    # here, since reaching this line means it did) -- the narrower "was the summary/control-total
+    # itself readable" question is preserved separately under s['_summary_available'] for the one
+    # caller (ITC 3B vs 2B's F7a) that actually needs that specific distinction.
+    s["_summary_available"] = s.get("available", True)
+    s["available"] = True
     s["_source"] = "excel"
     s["_file"] = os.path.basename(path)
     s["_lines"] = parsed
+    if not s["_summary_available"]:
+        # FALLBACK (per explicit instruction): when a taxpayer's GSTR-2B export has no 'ITC
+        # Available'/'ITC not available' summary sheet (document-wise export -- only B2B and
+        # B2B-CDNR), those two summary sheets' own figures are themselves nothing more than a
+        # sum of the SAME invoice-level B2B rows this tool already reads, grouped by the row's
+        # own 'ITC Availability' column ('ITC Available' = the Yes/Unconfirmed rows; 'ITC not
+        # available' = the No rows) -- so rather than leaving 'All other ITC' uncomputable,
+        # compute the identical figure directly from parsed['b2b']/['cdnr'] (both already
+        # correctly scoped to this exact month -- see parse_2b_excel's own marker-block fix).
+        # 'Yes'+'Unconfirmed' matches this tool's existing convention everywhere else it makes
+        # this exact distinction (an unconfirmed row is not assumed ineligible, since nothing
+        # states it is) -- confirmed rows only are excluded, matching the portal's own 'ITC not
+        # available' sheet.
+        def _yes_unconf(rows):
+            return [r for r in rows if str(r.get("itc_avail", "")).strip().upper() in ("YES", "UNCONFIRMED")]
+        b2b_ok = _yes_unconf(parsed.get("b2b", []))
+        s["ITC_all_other_IGST"] = round(sum(r["igst"] for r in b2b_ok), 2)
+        s["ITC_all_other_CGST"] = round(sum(r["cgst"] for r in b2b_ok), 2)
+        s["ITC_all_other_SGST"] = round(sum(r["sgst"] for r in b2b_ok), 2)
+        s["ITC_all_other_CESS"] = round(sum(r["cess"] for r in b2b_ok), 2)
+        cdnr_ok = _yes_unconf(parsed.get("cdnr", []))
+        cn_rows = [r for r in cdnr_ok if str(r.get("ntype", "")).strip().upper().startswith("C")]
+        dn_rows = [r for r in cdnr_ok if str(r.get("ntype", "")).strip().upper().startswith("D")]
+        # CN_IGST etc. are the NET amount Section D SUBTRACTS from ITC_all_other (i.e. positive
+        # = net reduction) -- Credit Notes reduce available ITC, Debit Notes restore/add to it,
+        # so CN total minus DN total gives exactly the net subtraction Section D's own formula
+        # (ITC_all_other - CN_IGST) expects.
+        s["CN_IGST"] = round(sum(r["igst"] for r in cn_rows) - sum(r["igst"] for r in dn_rows), 2)
+        s["CN_CGST"] = round(sum(r["cgst"] for r in cn_rows) - sum(r["cgst"] for r in dn_rows), 2)
+        s["CN_SGST"] = round(sum(r["sgst"] for r in cn_rows) - sum(r["sgst"] for r in dn_rows), 2)
+        s["CN_CESS"] = round(sum(r["cess"] for r in cn_rows) - sum(r["cess"] for r in dn_rows), 2)
+        # Section C (RCM, GSTR-3B 3.1(d)/4(A)(3) vs GSTR-2B) has the identical exposure --
+        # ITC_rcm_IGST/CGST/SGST also only ever came from the summary sheet, defaulting to a
+        # fabricated 0.0 the same way. The B2B sheet carries its own per-row Reverse Charge
+        # flag (captured as 'rcm' by parse_2b_excel already), so RCM-liable rows within the
+        # SAME Yes/Unconfirmed B2B rows already selected above give the identical fallback.
+        rcm_rows = [r for r in b2b_ok if str(r.get("rcm", "")).strip().upper().startswith("Y")]
+        s["ITC_rcm_IGST"] = round(sum(r["igst"] for r in rcm_rows), 2)
+        s["ITC_rcm_CGST"] = round(sum(r["cgst"] for r in rcm_rows), 2)
+        s["ITC_rcm_SGST"] = round(sum(r["sgst"] for r in rcm_rows), 2)
+        s["ITC_rcm_CESS"] = round(sum(r["cess"] for r in rcm_rows), 2)
+        s["_summary_computed_from_invoice_level"] = True
     return s
 
 
@@ -1657,19 +2048,41 @@ def _as_date(v):
 
 
 def _split_ewb_no_dt(v):
-    """'351569103816 - 04/03/2023 11:43:00' -> (ewb_no, date)."""
+    """'351569103816 - 04/03/2023 11:43:00' -> (ewb_no, date, time).
+    BUG FIX (found while implementing the EWB-vs-IRN timing check, per explicit request): the
+    source text for 'EWB No. & Dt.' genuinely carries a time-of-day (confirmed on this
+    taxpayer's real export -- e.g. '341599265378 - 12/05/2023 13:13:00'), but this function
+    used to discard it, returning only the date. That silently starved an EXISTING check
+    (gst_checks_hsn_fraud.py's same-window EWB clustering check, which reads e.get('ewbtime'))
+    of any real data -- e.get('ewbtime') was always None, so that check could never fire.
+    Now returns the time too (a THIRD tuple element, so every existing caller that only ever
+    unpacked (ewbno, date) two-at-a-time still works unchanged) -- callers that want it store
+    it under a separate 'ewbtime' key rather than folding it into 'ewbdate', so every existing
+    piece of `.days`-based date arithmetic on ewbdate/docdate (several real checks depend on
+    date-minus-date subtraction, which breaks if either side becomes a datetime) is completely
+    unaffected. 'Doc No. & Dt.' (the other caller) genuinely carries no time in this data
+    source -- confirmed on the raw file -- so its own third return value is simply always None,
+    correctly reflecting that it was never available, not a parsing failure."""
     if not v:
-        return "", None
+        return "", None, None
     s = str(v)
     parts = s.split(" - ", 1)
     ewbno = parts[0].strip()
     date = None
+    time = None
     if len(parts) > 1:
         m = re.search(r"(\d{2})/(\d{2})/(\d{4})", parts[1])
         if m:
             dd, mm, yyyy = m.groups()
             date = _dt.date(int(yyyy), int(mm), int(dd))
-    return ewbno, date
+        mt = re.search(r"(\d{1,2}):(\d{2})(?::(\d{2}))?", parts[1])
+        if mt:
+            hh, mi, ss = mt.groups()
+            try:
+                time = _dt.time(int(hh), int(mi), int(ss or 0))
+            except ValueError:
+                time = None
+    return ewbno, date, time
 
 
 def _find_data_sheet(wb):
@@ -1706,7 +2119,7 @@ def dominant_hsn_is_services(hsn_rows):
 
 def parse_annual_ewb(path):
     """Return list of dicts: ewbno, ewbdate, month, docno, docdate, from_gstin,
-    to_gstin, assess, taxval, hsn, vehicle, rate.
+    to_gstin, assess, taxval, hsn, hsn_desc, vehicle, rate.
 
     BUG FIX (confirmed against real outward/inward EWB exports -- this was THE largest source of
     false positives across checks #1/#3/#5/#12/#13/#17): docno/docdate used to be computed by
@@ -1742,12 +2155,12 @@ def parse_annual_ewb(path):
             continue
         if str(r[0] or "").strip() in ("EWB No.", ""):
             continue
-        ewbno, ewbdate = _split_ewb_no_dt(g(r, "EWB No. & Dt."))
-        docno, docdate = _split_ewb_no_dt(g(r, "Doc No. & Dt."))
+        ewbno, ewbdate, ewbtime = _split_ewb_no_dt(g(r, "EWB No. & Dt."))
+        docno, docdate, _docdate_time = _split_ewb_no_dt(g(r, "Doc No. & Dt."))
         docno = docno.strip().upper()   # per the brief: cleaned doc_number, uppercased, for matching
         month = f"{MONTH_ABBR.get(ewbdate.month,'?')}-{str(ewbdate.year)[2:]}" if ewbdate else None
         out.append(dict(
-            ewbno=str(g(r, "EWB No.") or ewbno).strip(), ewbdate=ewbdate, month=month,
+            ewbno=str(g(r, "EWB No.") or ewbno).strip(), ewbdate=ewbdate, ewbtime=ewbtime, month=month,
             docno=docno, docdate=docdate,
             from_gstin=_gstin_of(g(r, "From GSTIN & Name")),
             from_name=str(g(r, "From GSTIN & Name") or "").split("/", 1)[-1].strip(),
@@ -1757,6 +2170,7 @@ def parse_annual_ewb(path):
             to_place=str(g(r, "To Place & Pin") or "").strip(),
             assess=_num_ewb(g(r, "Assess Val.")), taxval=_num_ewb(g(r, "Tax Val.")),
             hsn=str(g(r, "HSN Code") or "").strip(),
+            hsn_desc=str(g(r, "HSN Desc.") or "").strip(),
             vehicle=str(g(r, "Latest Vehicle No.") or "").strip(),
             rate=_num_ewb(g(r, "TAX RATE")),
         ))
@@ -1808,7 +2222,14 @@ def _hdr_row_idx(rows, must_contain):
 
 def parse_b2ba(path, month):
     """9A amendment sheet: corrections to B2B invoices reported in an earlier
-    period, scoped to ONE month's block out of the merged workbook."""
+    period, scoped to ONE month's block out of the merged workbook.
+    BUG FIX -- same root cause as the b2b/cdnr/b2cl continuation-row fixes: a multi-rate
+    amendment leaves every identity column (GSTIN, Receiver Name, Original/Revised Invoice
+    Number+date) blank on its continuation rows. Confirmed on real data (4 such rows in this
+    taxpayer's FY, e.g. invoice CNN24A000302 amended with both an 18% and a 28% line, only the
+    first of which used to carry the invoice identity). This feeds both the B2 comparison's
+    amendment-aware splicing AND the Rectification Pairs sheet, so an unfixed continuation row
+    here would understate a revised invoice's value in both places. Forward-filled the same way."""
     wb = openpyxl.load_workbook(path, data_only=True)
     if "b2ba" not in wb.sheetnames:
         return []
@@ -1819,18 +2240,29 @@ def parse_b2ba(path, month):
     hdr = [str(c).strip() if c else "" for c in rows[hi]]
     H = {h: i for i, h in enumerate(hdr)}
     out = []
+    last = None  # (gstin, recipient, orig_invno, orig_date, revised_invno, revised_date, invval, pos)
     for r in mpu.rows_for_month(rows, hi, month):
-        if not r or not r[H.get("Original Invoice Number", 0)]:
+        if not r or not any(r):
             continue
         g = lambda k: r[H[k]] if k in H and H[k] < len(r) else None
+        raw_orig = g("Original Invoice Number")
+        raw_gstin = g("GSTIN/UIN of Recipient")
+        if raw_orig not in (None, "") and raw_gstin not in (None, ""):
+            last = (str(raw_gstin).strip(), str(g("Receiver Name") or "").strip(),
+                    str(raw_orig).strip(), g("Original Invoice date"),
+                    str(g("Revised Invoice Number") or "").strip(), g("Revised Invoice date"),
+                    _num_amd(g("Invoice Value")), str(g("Place Of Supply") or "").strip())
+        elif last is None:
+            continue  # no primary row seen yet this month -- can't attribute, skip rather than guess
+        gstin_v, recipient_v, orig_invno_v, orig_date_v, revised_invno_v, revised_date_v, invval_v, pos_v = last
         out.append(dict(
-            gstin=str(g("GSTIN/UIN of Recipient") or "").strip(),
-            recipient=str(g("Receiver Name") or "").strip(),
-            orig_invno=str(g("Original Invoice Number") or "").strip(),
-            orig_date=g("Original Invoice date"),
-            revised_invno=str(g("Revised Invoice Number") or "").strip(),
-            revised_date=g("Revised Invoice date"),
-            invval=_num_amd(g("Invoice Value")), pos=str(g("Place Of Supply") or "").strip(),
+            gstin=gstin_v,
+            recipient=recipient_v,
+            orig_invno=orig_invno_v,
+            orig_date=orig_date_v,
+            revised_invno=revised_invno_v,
+            revised_date=revised_date_v,
+            invval=invval_v, pos=pos_v,
             rate=_num_amd(g("Rate")), taxable=_num_amd(g("Taxable Value")),
             igst=_num_amd(g("Integrated Tax")), cgst=_num_amd(g("Central Tax")),
             sgst=_num_amd(g("State/UT Tax")), cess=_num_amd(g("Cess Amount")),
@@ -1840,7 +2272,9 @@ def parse_b2ba(path, month):
 
 def parse_cdnra(path, month):
     """9C amendment sheet: corrections to credit/debit notes reported earlier,
-    scoped to ONE month's block out of the merged workbook."""
+    scoped to ONE month's block out of the merged workbook.
+    BUG FIX -- same root cause as parse_b2ba() above; confirmed on real data (e.g. note
+    VOU24A000545 amended with both an 18% and a 28% line). Forward-filled the same way."""
     wb = openpyxl.load_workbook(path, data_only=True)
     if "cdnra" not in wb.sheetnames:
         return []
@@ -1851,17 +2285,27 @@ def parse_cdnra(path, month):
     hdr = [str(c).strip() if c else "" for c in rows[hi]]
     H = {h: i for i, h in enumerate(hdr)}
     out = []
+    last = None  # (gstin, orig_noteno, orig_date, revised_noteno, revised_date, note_type)
     for r in mpu.rows_for_month(rows, hi, month):
-        if not r or not r[H.get("Original Note Number", 0)]:
+        if not r or not any(r):
             continue
         g = lambda k: r[H[k]] if k in H and H[k] < len(r) else None
+        raw_orig = g("Original Note Number")
+        raw_gstin = g("GSTIN/UIN of Recipient")
+        if raw_orig not in (None, "") and raw_gstin not in (None, ""):
+            last = (str(raw_gstin).strip(), str(raw_orig).strip(), g("Original Note Date"),
+                    str(g("Revised Note Number") or "").strip(), g("Revised Note Date"),
+                    str(g("Note Type") or "").strip())
+        elif last is None:
+            continue
+        gstin_v, orig_noteno_v, orig_date_v, revised_noteno_v, revised_date_v, note_type_v = last
         out.append(dict(
-            gstin=str(g("GSTIN/UIN of Recipient") or "").strip(),
-            orig_noteno=str(g("Original Note Number") or "").strip(),
-            orig_date=g("Original Note Date"),
-            revised_noteno=str(g("Revised Note Number") or "").strip(),
-            revised_date=g("Revised Note Date"),
-            note_type=str(g("Note Type") or "").strip(),
+            gstin=gstin_v,
+            orig_noteno=orig_noteno_v,
+            orig_date=orig_date_v,
+            revised_noteno=revised_noteno_v,
+            revised_date=revised_date_v,
+            note_type=note_type_v,
             taxable=_num_amd(g("Taxable Value")), igst=_num_amd(g("Integrated Tax")),
             cgst=_num_amd(g("Central Tax")), sgst=_num_amd(g("State/UT Tax")),
         ))

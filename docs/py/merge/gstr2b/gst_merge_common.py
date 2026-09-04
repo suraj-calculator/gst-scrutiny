@@ -1,10 +1,20 @@
 """
-Shared helpers for GSTR1 / GSTR3B / E-Invoice merge scripts.  (v2)
+Shared helpers for GSTR1 / GSTR3B / E-Invoice / GSTR2B merge scripts.  (v3)
 Keep this file in the same folder as the merge_*.py scripts.
 
 v2 adds two small defensive helpers (find_label_cell, dump_region) used by
 merge_gstr3b.py to cope with GSTR-3B files whose header layout has shifted
 away from the E5:E12 addresses the script originally assumed.
+
+v3 adds support for the GST portal's "document-wise" GSTR-2B export. That
+export drops the 'Read me' sheet (and the ITC-summary sheets) entirely and
+keeps only whichever line-item sheets have data for the period (commonly
+just B2B / B2B-CDNR) - so detect_file_type() didn't recognise it as GSTR2B
+at all, and there was no header block left to read Tax Period/GSTIN from
+even if it had. detect_file_type() now also matches this shape, and
+meta_from_filename() recovers Tax Period/FY/GSTIN from the filename itself
+(the portal encodes them there: <ts>_<MMYYYY>_<GSTIN>_GSTR2B_<DDMMYYYY>_<n>.xlsx),
+since the file has nowhere else left to read them from.
 """
 import copy
 import glob
@@ -38,8 +48,21 @@ def find_xlsx_files(folder="."):
     return sorted(glob.glob(os.path.join(folder, "*.xlsx")))
 
 
+# Line-item sheets that can appear in a GSTR-2B workbook. A full/consolidated
+# export always pairs these with 'Read me' + the ITC-summary sheets; the
+# portal's "document-wise" export drops Read me/ITC entirely and ships only
+# whichever of these have data for that period - see detect_file_type().
+GSTR2B_LINE_ITEM_SHEETS = {
+    "B2B", "B2BA", "B2B-CDNR", "B2B-CDNRA", "ISD", "ISDA",
+    "IMPG", "IMPGA", "IMPGSEZ", "IMPGSEZA", "ECO", "ECOA",
+    "B2B(Rejected)", "B2BA(Rejected)", "B2B-CDNR(Rejected)",
+    "B2B-CDNRA(Rejected)", "ECO(Rejected)", "ECOA(Rejected)",
+}
+
+
 def detect_file_type(path):
-    """Return 'EINV', 'GSTR1', 'GSTR3B', 'GSTR2B', or None based on sheet-name signature."""
+    """Return 'EINV', 'GSTR1', 'GSTR3B', 'GSTR2B', 'GSTR2B_DOCWISE', or None
+    based on sheet-name signature."""
     try:
         wb = load_workbook(path, read_only=True, data_only=True)
     except Exception:
@@ -54,6 +77,8 @@ def detect_file_type(path):
         return "GSTR1"
     if "Read me" in names and "b2b, sez, de" in names:
         return "EINV"
+    if names and "Read me" not in names and names.issubset(GSTR2B_LINE_ITEM_SHEETS):
+        return "GSTR2B_DOCWISE"
     return None
 
 
@@ -96,18 +121,11 @@ def warn_duplicates(records):
 
 
 def sheet_max_data_row(ws, min_row):
-    """Last row index (1-based) that has at least one non-empty cell, from min_row onward.
-
-    PERFORMANCE: uses iter_rows(values_only=True) rather than repeated
-    ws[r]/.cell().value access -- openpyxl builds a full Cell wrapper object
-    per access for the latter, which is the dominant cost on a large sheet
-    (measured: a real ~2000-row GSTR-2B 'B2B' sheet spent the bulk of a
-    28s merge step in exactly this kind of cell-by-cell scanning).
-    values_only=True yields plain values directly, skipping that overhead."""
+    """Last row index (1-based) that has at least one non-empty cell, from min_row onward."""
     last = min_row - 1
-    for offset, row in enumerate(ws.iter_rows(min_row=min_row, values_only=True)):
-        if any(v is not None and str(v).strip() != "" for v in row):
-            last = min_row + offset
+    for r in range(min_row, ws.max_row + 1):
+        if any(c.value is not None and str(c.value).strip() != "" for c in ws[r]):
+            last = r
     return last
 
 
@@ -244,6 +262,56 @@ def robust_read_meta(ws, fixed_cells, label_fallbacks, path, key_validators=None
         return None
 
     return meta
+
+
+MONTH_NUM_TO_NAME = {
+    1: "January", 2: "February", 3: "March", 4: "April", 5: "May", 6: "June",
+    7: "July", 8: "August", 9: "September", 10: "October", 11: "November",
+    12: "December",
+}
+
+# <timestamp>_<MM><YYYY>_<GSTIN>_GSTR2B_<DD><MM><YYYY>_<n>.xlsx
+# e.g. 1788197629314_012024_05AAAFB8782C1ZO_GSTR2B_31082026_1.xlsx
+# BUG FIX: the GST portal's own direct download of a document-wise GSTR-2B carries NO
+# timestamp prefix at all -- e.g. '012024_05AAAFB8782C1ZO_GSTR2B_31082026_1.xlsx' (confirmed
+# on a real taxpayer's full 12-month set of downloads). The old pattern required a literal
+# '_' immediately BEFORE the MMYYYY token, which only exists when some upload tool has
+# prepended a timestamp segment -- on a plain portal download the MMYYYY token sits at the
+# very start of the filename with no leading underscore, so the old regex matched nothing
+# and every single file in a folder like that was [SKIP]ped, silently producing NO merged
+# output at all (confirmed: 12/12 real files skipped, 0 records, no output file written).
+# '(?:^|_)' accepts the token at the start of the filename OR after an underscore, so both
+# the bare portal filename and a timestamp-prefixed one still match.
+FILENAME_META_RE = re.compile(
+    r'(?:^|_)(\d{2})(\d{4})_([0-9A-Za-z]{15})_GSTR2B_(\d{2})(\d{2})(\d{4})_'
+)
+
+
+def meta_from_filename(path):
+    """Fallback meta-reader for the GST portal's 'document-wise' GSTR-2B
+    export (see GSTR2B_LINE_ITEM_SHEETS / detect_file_type): that export has
+    no 'Read me' sheet, so there's no header block left to read Tax
+    Period/GSTIN from. The portal still encodes them in the filename itself.
+    Legal Name is not recoverable from the file or filename at all - callers
+    should backfill it from a sibling record with the same GSTIN when one is
+    available (e.g. a same-batch file that does have a Read me sheet).
+    Returns None if the filename doesn't match the expected pattern.
+    """
+    m = FILENAME_META_RE.search(os.path.basename(path))
+    if not m:
+        return None
+    mm, yyyy, gstin, gd, gm, gy = m.groups()
+    month, year = int(mm), int(yyyy)
+    if month not in MONTH_NUM_TO_NAME:
+        return None
+    fy_start = year if month >= 4 else year - 1
+    return {
+        "fy": f"{fy_start}-{str((fy_start + 1) % 100).zfill(2)}",
+        "tax_period": MONTH_NUM_TO_NAME[month],
+        "gstin": gstin,
+        "legal_name": None,
+        "generated_on": f"{gd}/{gm}/{gy}",
+    }
 
 
 def looks_like_fy(v):

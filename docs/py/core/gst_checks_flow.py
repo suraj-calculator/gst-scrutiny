@@ -56,6 +56,7 @@ from openpyxl.utils import get_column_letter
 import gst_core as mpu
 import gst_parsers_returns as pr
 import gst_parsers_dept as dept
+import gst_checks_hsn_fraud as hfc
 from gst_checks_forensic import Finding
 import gst_config as cfg
 
@@ -261,10 +262,30 @@ def read_2b_invoice_level(path, month):
     """Invoice-level 2B for one month: B2B invoices + B2B-CDNR notes.
     Returns totals AND the raw rows (needed by the counterparty views).
     Reuses the existing, per-row-period-tagged parser -- it is the SUMMARY
-    reader that is unreliable, not the invoice reader."""
+    reader that is unreliable, not the invoice reader.
+
+    UPDATED (per explicit instruction): every row's ITC Availability status is classified into
+    exactly one of three buckets -- YES (portal confirms available), NO (portal flags
+    ineligible -- e.g. confirmed real: 'POS and supplier state are same but recipient state is
+    different'), or UNCONFIRMED (status could not be read -- confirmed real: on some CDNR rows
+    with additional misalignment beyond Rate, the 'back half' of the row -- Filing Date, ITC
+    Availability, Reason -- has its own separate shift this tool does not yet resolve, so the
+    status field itself reads blank/NA rather than a real value; the TAX AMOUNTS on these same
+    rows are correctly read via the rate-based shift fix -- only the status is unknown).
+
+    PRIMARY 'available' figure (tot['itc'], tot['cn_itc']) = YES + UNCONFIRMED (excludes only
+    a CONFIRMED No -- per instruction, an unconfirmed row is not assumed ineligible, since
+    there is no portal statement that it is). Two REFERENCE figures are also computed and
+    returned, unrounded, so a reader can pick whichever definition suits: tot['itc_yes_only']
+    (excludes unconfirmed too) and tot['itc_grand_total'] (Yes+No+Unconfirmed, no exclusion at
+    all). ARITHMETIC IDENTITY that must hold exactly, checked by the caller/tests:
+    yes + no + unconfirmed == grand_total, and yes + unconfirmed == grand_total - no."""
     empty = dict(available=False, taxable=0.0, igst=0.0, cgst=0.0, sgst=0.0, cess=0.0,
                  itc=0.0, cn_taxable=0.0, cn_itc=0.0, invoices=0, suppliers=0,
-                 rcm_itc=0.0, rows=[], cdnr=[])
+                 rcm_itc=0.0, rows=[], cdnr=[],
+                 itc_yes_only=0.0, itc_no_only=0.0, itc_unconfirmed_only=0.0, itc_grand_total=0.0,
+                 cn_itc_yes_only=0.0, cn_itc_no_only=0.0, cn_itc_unconfirmed_only=0.0, cn_itc_grand_total=0.0,
+                 no_confirmed_rows=[], unconfirmed_rows=[])
     if not path or not os.path.exists(path):
         return empty
     try:
@@ -275,17 +296,46 @@ def read_2b_invoice_level(path, month):
     tot = dict(empty, available=True, rows=b2b, cdnr=cdnr)
     tot["invoices"] = len(b2b)
     tot["suppliers"] = len({x["gstin"] for x in b2b})
+    no_confirmed_rows, unconfirmed_rows = [], []
     for x in b2b:
-        tot["taxable"] += x["taxable"]
-        tot["igst"] += x["igst"]; tot["cgst"] += x["cgst"]
-        tot["sgst"] += x["sgst"]; tot["cess"] += x["cess"]
-        if str(x.get("rcm", "")).strip().upper().startswith("Y"):
-            tot["rcm_itc"] += x["igst"] + x["cgst"] + x["sgst"] + x["cess"]
+        status = str(x.get("itc_avail", "")).strip().upper()
+        line_itc = x["igst"] + x["cgst"] + x["sgst"] + x["cess"]
+        if status == "YES":
+            tot["itc_yes_only"] += line_itc
+            if str(x.get("rcm", "")).strip().upper().startswith("Y"):
+                tot["rcm_itc"] += line_itc
+        elif status == "NO":
+            tot["itc_no_only"] += line_itc
+            no_confirmed_rows.append(dict(month=month, source="B2B", **x))
+        else:
+            tot["itc_unconfirmed_only"] += line_itc
+            unconfirmed_rows.append(dict(month=month, source="B2B", **x))
+        if status != "NO":
+            # PRIMARY aggregate = YES + UNCONFIRMED (every status except a confirmed NO).
+            tot["taxable"] += x["taxable"]
+            tot["igst"] += x["igst"]; tot["cgst"] += x["cgst"]
+            tot["sgst"] += x["sgst"]; tot["cess"] += x["cess"]
     tot["itc"] = tot["igst"] + tot["cgst"] + tot["sgst"] + tot["cess"]
+    tot["itc_grand_total"] = tot["itc_yes_only"] + tot["itc_no_only"] + tot["itc_unconfirmed_only"]
     for c in cdnr:
+        status = str(c.get("itc_avail", "")).strip().upper()
         sign = -1.0 if str(c.get("ntype", "")).strip().upper().startswith("C") else 1.0
-        tot["cn_taxable"] += sign * c["taxable"]
-        tot["cn_itc"] += sign * (c["igst"] + c["cgst"] + c["sgst"] + c["cess"])
+        line_itc = sign * (c["igst"] + c["cgst"] + c["sgst"] + c["cess"])
+        if status == "YES":
+            tot["cn_itc_yes_only"] += line_itc
+        elif status == "NO":
+            tot["cn_itc_no_only"] += line_itc
+            no_confirmed_rows.append(dict(month=month, source="CDNR", **c))
+        else:
+            tot["cn_itc_unconfirmed_only"] += line_itc
+            unconfirmed_rows.append(dict(month=month, source="CDNR", **c))
+        if status != "NO":
+            # PRIMARY aggregate = YES + UNCONFIRMED, same rule as B2B above.
+            tot["cn_taxable"] += sign * c["taxable"]
+            tot["cn_itc"] += line_itc
+    tot["cn_itc_grand_total"] = tot["cn_itc_yes_only"] + tot["cn_itc_no_only"] + tot["cn_itc_unconfirmed_only"]
+    tot["no_confirmed_rows"] = no_confirmed_rows
+    tot["unconfirmed_rows"] = unconfirmed_rows
     return tot
 
 
@@ -439,11 +489,102 @@ def build_purchase_sales_stock(ctx):
     else:
         notes.append("Audited Inventories not available (bs_pl_input.py not filled in for this "
                      "taxpayer) -- no independent inventory context could be shown.")
+
+    # ---- NEW (per instruction, point 1): HSN-wise YEARLY comparison, Inward (E-Way Bill) vs
+    # Outward (GSTR-1) supply. Genuine third-party inward movements only (self-to-self branch/
+    # stock transfers excluded, same convention as the Machinery HSN Scan and Zero-Tax Scan
+    # sheets). Compared at 4-digit HSN heading level, since EWB's own HSN Code and GSTR-1's own
+    # HSN summary code are not guaranteed to be reported at the same digit length for the same
+    # taxpayer -- 4-digit is the common denominator both can always be reduced to.
+    self_gstin = ctx.get("self_gstin") or ""
+    # ewb_in_by_hsn: [0]=assess value, [1]=tax value, [2]=EWB count, [3]=a sample desc.
+    # BUG FIX/ADDITION (per explicit request): 'Inward Assessable Value (EWB)' had no
+    # accompanying tax-value column -- the raw inward EWB row already carries its own 'Tax
+    # Val.' figure (same source as Assess Val.), just never summed here. Added as its own
+    # column, same per-HSN aggregation as assess value.
+    ewb_in_by_hsn = defaultdict(lambda: [0.0, 0.0, 0, ""])
+    for x in (ctx.get("ewb_in_rows") or []):
+        if x.get("from_gstin") and x.get("from_gstin") != self_gstin and x.get("to_gstin") == self_gstin:
+            h4 = str(x.get("hsn") or "").strip()[:4]
+            if not h4:
+                continue
+            e = ewb_in_by_hsn[h4]
+            e[0] += _n(x.get("assess")); e[1] += _n(x.get("taxval")); e[2] += 1
+            if not e[3] and x.get("hsn_desc"):
+                e[3] = x["hsn_desc"]
+    g1_out_by_hsn = defaultdict(lambda: [0.0, 0.0, ""])   # taxable, tax, description
+    for month_rows in (ctx.get("g1_hsn_by_month") or {}).values():
+        for row in month_rows:
+            h4 = str(row.get("hsn") or "").strip()[:4]
+            if not h4:
+                continue
+            g = g1_out_by_hsn[h4]
+            g[0] += _n(row.get("taxable"))
+            g[1] += _n(row.get("igst")) + _n(row.get("cgst")) + _n(row.get("sgst")) + _n(row.get("cess"))
+            if not g[2] and row.get("desc"):
+                g[2] = row.get("desc")
+    all_h4 = sorted(set(ewb_in_by_hsn) | set(g1_out_by_hsn))
+    hsn_compare_rows = []
+    for h in all_h4:
+        ein = ewb_in_by_hsn.get(h, [0.0, 0.0, 0, ""])
+        gout = g1_out_by_hsn.get(h, [0.0, 0.0, ""])
+        hsn_compare_rows.append([h, gout[2] or ein[3], round(ein[0], 2), round(ein[1], 2), ein[2],
+                                 round(gout[0], 2), round(gout[1], 2), round(gout[0] - ein[0], 2)])
+    hsn_compare_rows.sort(key=lambda r: -(r[2] + r[5]))
+
+    # ---- NEW (per instruction, point 2): commodity-wise list from inward EWB's own HSN
+    # Description -- which commodities, and how many, moved inward across the whole FY.
+    # IMPORTANT LIMITATION, stated plainly rather than guessed around: the inward E-Way Bill
+    # export has NO quantity/UQC column at all (confirmed directly against the raw file header:
+    # EWB No. / From & To GSTIN+Name / From & To Place / EWB No.&Dt. / Doc No.&Dt. / Assess Val.
+    # / Tax Val. / HSN Code / HSN Desc. / Latest Vehicle No. -- twelve columns, no unit count
+    # anywhere). So "how many" below means number of inward EWB documents for that commodity,
+    # NOT physical quantity/units -- the closest genuine proxy this data supports, not a
+    # fabricated unit count.
+    commodity = defaultdict(lambda: [0, 0.0, set()])   # doc count, total assess value, HSN codes seen
+    for x in (ctx.get("ewb_in_rows") or []):
+        if x.get("from_gstin") and x.get("from_gstin") != self_gstin and x.get("to_gstin") == self_gstin:
+            desc = (x.get("hsn_desc") or "").strip().upper()
+            if not desc:
+                continue
+            c = commodity[desc]
+            c[0] += 1; c[1] += _n(x.get("assess")); c[2].add(str(x.get("hsn") or "").strip())
+    commodity_rows = [[desc, ", ".join(sorted(v[2])), v[0], round(v[1], 2)]
+                       for desc, v in commodity.items()]
+    commodity_rows.sort(key=lambda r: -r[2])
+
+    extra_tables = [
+        dict(title=f"HSN-wise Yearly Comparison -- Inward (E-Way Bill) vs Outward (GSTR-1) "
+                   f"({len(hsn_compare_rows)} HSN heading(s))",
+             subtitle="4-digit HSN heading level, whole FY. Inward is genuine third-party e-way "
+                      "bill movement only (self-to-self branch/stock transfers excluded). "
+                      "'Net' = Outward taxable minus Inward assessable -- a large positive value "
+                      "means far more was sold under that heading than physically received "
+                      "inward under it that year (worth checking whether that heading is also "
+                      "manufactured/processed from a DIFFERENT inward HSN, not necessarily an "
+                      "anomaly by itself).",
+             header=["HSN Heading (4-digit)", "Description", "Inward Assessable Value (EWB)",
+                    "Inward Tax Value (EWB)", "Inward EWB Count", "Outward Taxable Value (GSTR-1)",
+                    "Outward Tax (GSTR-1)", "Net (Outward - Inward)"],
+             widths=[16, 40, 22, 18, 14, 22, 18, 20], rows=hsn_compare_rows,
+             empty_note="No inward EWB or outward GSTR-1 HSN data available."),
+        dict(title=f"Commodities Purchased This FY -- from Inward E-Way Bill HSN Description "
+                   f"({len(commodity_rows)} distinct commodit(y/ies))",
+             subtitle="LIMITATION: the inward e-way bill export has no quantity/UQC column at "
+                      "all -- 'Inward EWB Count' below is the number of inward e-way bill "
+                      "documents naming that exact commodity description, NOT a physical unit "
+                      "count. Treat it as a document-volume proxy, not quantity purchased.",
+             header=["Commodity (HSN Description, as printed on the EWB)", "HSN Code(s) seen",
+                    "Inward EWB Count (documents, NOT quantity)", "Total Assessable Value (Rs)"],
+             widths=[46, 24, 26, 22], rows=commodity_rows,
+             empty_note="No inward EWB HSN description data available."),
+    ]
+
     return dict(header=["Month", "Taxable purchases (2B, invoice level)", "2B invoices",
                         "Taxable sales (GSTR-1 net of CN)", "GSTR-1 invoices",
                         "Monthly difference", "Cumulative difference", "Note"],
                 widths=[10, 30, 12, 30, 15, 20, 22, 60], rows=rows,
-                findings=findings, notes=notes)
+                findings=findings, notes=notes, extra_tables=extra_tables)
 
 
 def _mom_outlier_check(values_by_month, months, threshold, floor=0.0):
@@ -485,20 +626,40 @@ def build_itc_annual_summary(ctx):
     row, matching this workbook's existing Month + FY TOTAL convention.
 
     Explicitly scoped to THIS FY only per instruction -- no multi-year aging,
-    no running multi-year pool, no cross-file linking. Where a figure needs
-    NEXT year's tool to complete (prior-FY carry-forward reclaim), the column
-    is still present, labelled N/A, not hidden.
+    no running multi-year pool, no cross-file linking.
 
-    Sources every figure from data this tool ALREADY computes elsewhere
+    UPDATED (per instruction): now shows ITC Available as per 2A AND 2B in separate columns
+    (previously 2B only). The 'carried forward from last FY' concept is now shown TWO ways,
+    side by side, since both are genuinely useful and answer slightly different questions:
+      - INFERRED (computed): per the exact formula given -- (2B Available - 4B(1) - 4B(2)) is
+        what THIS FY's own 2B genuinely supports after reversals; if Current-FY-Claimed exceeds
+        that, the excess is inferred to be carry-forward from an earlier period. Computed every
+        month AND at FY level, from data already in this sheet -- no new source needed.
+      - GSTR-9 Table 13 (authoritative, filed): the taxpayer's own annual return figure for
+        'ITC availed for the previous financial year'. FY-level only (no month split in the
+        source itself), and only available when GSTR-9 is supplied as Excel (documented
+        tool-wide limitation -- PDF isn't parsed). Kept alongside the inferred figure, not
+        replaced by it: where they diverge materially, that gap itself is worth a look (either
+        the taxpayer's own return has a different reclaim pattern than a same-FY-only formula
+        can infer, or there's a genuine discrepancy worth raising).
+
+    ALSO NEW: Table 8A (government-computed, from GSTR-2A, auto-populated into GSTR-9) is now
+    cross-referenced as a THIRD independent FY-level ITC-available figure alongside 2A and 2B --
+    see F1a. Table 8A's own data additionally carries an ITC=No reason breakdown (e.g. "POS and
+    supplier state are same but recipient state is different"), the SAME category of reason this
+    session's fix found material amounts under -- a useful independent confirmation source.
+
+    Sources every other figure from data this tool ALREADY computes elsewhere
     (ctx['g3b_by_month']/['g3b_extra_by_month'] for Table 4, ctx['twob_by_month']
-    for invoice-level 2B -- the SAME fields 'ITC 3B vs 2B' (F7) already reads,
-    so the numbers agree with that sheet by construction, not by a second,
-    possibly-diverging computation) plus the Cash/Credit Ledger inputs this
-    tool already loads (no new file loader needed -- both were already
-    supported, already used by the ITC Roll-Forward and RCM sheets)."""
+    for invoice-level 2B, ctx['r2a_data'] for invoice-level 2A -- the SAME fields
+    'ITC 3B vs 2B' (F7) already reads for 2B, so the numbers agree with that sheet
+    by construction, not by a second, possibly-diverging computation) plus the
+    Cash/Credit Ledger inputs this tool already loads."""
     rows, findings = [], []
     T = defaultdict(float)
-    any2b = False
+    any2a = any2b = False
+    r2a = ctx.get("r2a_data") or {}
+    r2a_b2b_by_month = r2a.get("b2b", {}) if r2a.get("available") else {}
     for m in ctx["months"]:
         g3b = ctx["g3b_by_month"].get(m, {})
         ex = ctx["g3b_extra_by_month"].get(m, {})
@@ -508,52 +669,156 @@ def build_itc_annual_summary(ctx):
         b1 = sum(_n(x) for x in (g3b.get("4B1") or [])[:4])
         b2 = sum(_n(x) for x in (g3b.get("4B2") or [])[:4])
         two = ctx["twob_by_month"].get(m, {})
-        avail = (two["itc"] + two["cn_itc"]) if two.get("available") else None
+        avail_2b = (two["itc"] + two["cn_itc"]) if two.get("available") else None
         if two.get("available"):
             any2b = True
-        pct_claimed = (claimed / avail * 100.0) if avail and abs(avail) > TOL else None
-        pct_b1 = (b1 / claimed * 100.0) if claimed and abs(claimed) > TOL else None
-        pct_b2 = (b2 / claimed * 100.0) if claimed and abs(claimed) > TOL else None
-        rows.append([m, avail, claimed, b1, b2, None, "N/A", pct_claimed, pct_b1, pct_b2])
-        if avail is not None:
-            T["avail"] += avail
+        # NEW (per explicit instruction): two reference figures alongside the PRIMARY (Yes +
+        # Unconfirmed) figure above -- computed from the SAME per-row classification
+        # read_2b_invoice_level already does (not a second, separately-derived calculation),
+        # so these three numbers are guaranteed internally consistent by construction:
+        #   avail_2b_yes_only        = excludes unconfirmed too (strictest)
+        #   avail_2b_grand_total     = Yes + No + Unconfirmed, no exclusion at all (loosest)
+        # Identity that must hold every month (verified for all 12 months of the real taxpayer
+        # this was built against before shipping): avail_2b_yes_only + no + unconfirmed ==
+        # avail_2b_grand_total, and avail_2b == avail_2b_grand_total - no.
+        avail_2b_yes_only = avail_2b_grand_total = None
+        if two.get("available"):
+            avail_2b_yes_only = two["itc_yes_only"] + two["cn_itc_yes_only"]
+            avail_2b_grand_total = two["itc_grand_total"] + two["cn_itc_grand_total"]
+            T["avail_2b_yes_only"] += avail_2b_yes_only
+            T["avail_2b_grand_total"] += avail_2b_grand_total
+        avail_2a = None
+        if m in r2a_b2b_by_month:
+            any2a = True
+            avail_2a = sum(_n(x.get("igst")) + _n(x.get("cgst")) + _n(x.get("sgst")) + _n(x.get("cess"))
+                           for x in r2a_b2b_by_month[m])
+        # NEW (per instruction, exact formula): (2B Available - 4B(1) - 4B(2)) is what this FY's
+        # own 2B genuinely supports after reversals; if Claimed exceeds that, the excess is
+        # inferred carry-forward.
+        inferred_cf = None
+        if avail_2b is not None:
+            net_after_reversal = avail_2b - b1 - b2
+            inferred_cf = max(0.0, claimed - net_after_reversal)
+        rows.append([m, avail_2a, avail_2b, b1, b2, claimed, inferred_cf, None,
+                     avail_2b_yes_only, avail_2b_grand_total])
+        if avail_2a is not None:
+            T["avail_2a"] += avail_2a
+        if avail_2b is not None:
+            T["avail_2b"] += avail_2b
         T["claimed"] += claimed; T["b1"] += b1; T["b2"] += b2
 
-    fy_pct_claimed = (T["claimed"] / T["avail"] * 100.0) if any2b and abs(T["avail"]) > TOL else None
-    fy_pct_b1 = (T["b1"] / T["claimed"] * 100.0) if abs(T["claimed"]) > TOL else None
-    fy_pct_b2 = (T["b2"] / T["claimed"] * 100.0) if abs(T["claimed"]) > TOL else None
-    rows.append(["FY TOTAL", (T["avail"] if any2b else None), T["claimed"], T["b1"], T["b2"],
-                 None, "N/A", fy_pct_claimed, fy_pct_b1, fy_pct_b2])
+    # GSTR-9 Table 13 -- FY-level only, no month breakdown in the source itself. Reuses
+    # ctx['gstr9'] (already parsed once for R13/R14 upstream) rather than re-reading the file.
+    g9 = ctx.get("gstr9") or {}
+    carry_fwd_gstr9 = None
+    if g9.get("table13_itc_igst") is not None:
+        carry_fwd_gstr9 = (_n(g9.get("table13_itc_cgst")) + _n(g9.get("table13_itc_sgst"))
+                           + _n(g9.get("table13_itc_igst")) + _n(g9.get("table13_itc_cess")))
+    fy_net_after_reversal = (T["avail_2b"] - T["b1"] - T["b2"]) if any2b else None
+    fy_inferred_cf = max(0.0, T["claimed"] - fy_net_after_reversal) if fy_net_after_reversal is not None else None
+    rows.append(["FY TOTAL", (T["avail_2a"] if any2a else None), (T["avail_2b"] if any2b else None),
+                 T["b1"], T["b2"], T["claimed"], fy_inferred_cf, carry_fwd_gstr9,
+                 (T["avail_2b_yes_only"] if any2b else None), (T["avail_2b_grand_total"] if any2b else None)])
 
     findings.append(Finding(
-        "F1", "ITC lifecycle -- Available, Claimed, Reversed (FY)", "INFO",
-        f"FY ITC available per GSTR-2B (invoice level) {_f(T['avail']) if any2b else 'not available'}; "
-        f"claimed under Table 4A {_f(T['claimed'])}"
-        + (f" ({fy_pct_claimed:.1f}% of available)" if fy_pct_claimed is not None else "") +
-        f"; reversed under 4B(1) {_f(T['b1'])}"
-        + (f" ({fy_pct_b1:.1f}% of claimed)" if fy_pct_b1 is not None else "") +
-        f", under 4B(2) {_f(T['b2'])}"
-        + (f" ({fy_pct_b2:.1f}% of claimed)" if fy_pct_b2 is not None else "") + ". "
-        "These are the SAME figures as the 'ITC Roll-Forward 4A-4B-4C' and 'ITC 3B vs 2B' sheets "
-        "(sourced identically, not independently re-derived) -- this sheet's own contribution is "
-        "the FY-level lifecycle view, the ledger tie-outs below, and the next-year handoff figures.",
-        dict(available_fy=T["avail"] if any2b else None, claimed_fy=T["claimed"],
-             reversed_4b1_fy=T["b1"], reversed_4b2_fy=T["b2"])))
+        "F1", "ITC lifecycle -- Available (2A/2B), Claimed, Reversed (FY)", "INFO",
+        f"FY ITC available per GSTR-2A (invoice level) {_f(T['avail_2a']) if any2a else 'not available'}; "
+        f"per GSTR-2B (invoice level) {_f(T['avail_2b']) if any2b else 'not available'}; "
+        f"claimed under Table 4A (FULL -- 4A(1) imports of goods + 4A(2) imports of services + "
+        f"4A(3) RCM + 4A(4) ISD + 4A(5) all-other) {_f(T['claimed'])}; "
+        f"reversed under 4B(1) {_f(T['b1'])}, under 4B(2) {_f(T['b2'])}. "
+        f"CLARIFICATION on a genuine, deliberate difference (not an error, but confirmed confusing "
+        f"across sheets so stated explicitly here): the 'ITC 3B vs 2B' sheet's own 'claimed' figure "
+        f"will be SMALLER than this one -- that sheet deliberately scopes to 4A(5) 'All Other ITC' "
+        f"ONLY, because it compares claimed ITC against GSTR-2B's INVOICE-level data, and imports/ "
+        f"RCM/ISD don't originate from any supplier's 2B invoice at all (so there is nothing in 2B "
+        f"to check those three sub-heads against). The 2B AVAILABLE figure, 4B(1), and 4B(2) here "
+        f"ARE the same as 'ITC Roll-Forward 4A-4B-4C' and 'ITC 3B vs 2B' (sourced identically, not "
+        f"independently re-derived) -- only the CLAIMED/4A figure differs between this sheet (full "
+        f"Table 4A) and 'ITC 3B vs 2B' (4A(5) only), and now both sheets say so in their own text.",
+        dict(available_2a_fy=T["avail_2a"] if any2a else None, available_2b_fy=T["avail_2b"] if any2b else None,
+             claimed_fy_full_4a=T["claimed"], reversed_4b1_fy=T["b1"], reversed_4b2_fy=T["b2"])))
 
     findings.append(Finding(
-        "F2", "Reclaim tracking -- this FY's own 4B(2) reversals", "INFO",
+        "F2", "ITC carried forward from last FY -- INFERRED (computed, this FY's own data only)",
+        "INFO" if fy_inferred_cf else "PASS",
+        f"Formula (as specified): (2B Available - 4B(1) - 4B(2)) is what this FY's own GSTR-2B "
+        f"genuinely supports after reversals = {_f(fy_net_after_reversal) if fy_net_after_reversal is not None else 'n/a'}. "
+        f"FY Claimed (full Table 4A) = {_f(T['claimed'])}. Where Claimed exceeds that net-available "
+        f"figure, the excess is inferred to be carry-forward from an earlier period: "
+        f"{_f(fy_inferred_cf) if fy_inferred_cf is not None else 'n/a'}. Computed every month in the "
+        f"table above too, not just at FY level. LIMITATION, stated plainly: this is a same-FY-only "
+        f"inference (excess claimed over this year's own net-available), not a proven link to any "
+        f"specific prior-year invoice -- it will move with normal month-to-month timing noise (e.g. "
+        f"a supplier filing late) even with no real carry-forward at all. Compare against F3 below "
+        f"(the taxpayer's own filed GSTR-9 Table 13 figure, where available) -- a large, persistent "
+        f"gap between the two is worth a closer look; broad agreement is a good consistency signal.",
+        dict(fy_net_after_reversal=fy_net_after_reversal, fy_claimed=T["claimed"], inferred_carry_forward=fy_inferred_cf)))
+    findings.append(Finding(
+        "F2a", "Reclaim tracking -- this FY's own 4B(2) reversals", "INFO",
         "Left blank rather than estimated: this tool has no transaction-level tag distinguishing "
         "'this is a reclaim of an earlier 4B(2) reversal' from any other 4B(2)/4D entry -- a "
         "month's 4B(2) figure is a single total, not itemised by what it relates to. Populating "
         "this column would mean guessing which part of a later month's ITC is a reclaim, which "
         "this tool does not do. If your working papers track this separately, the correct FY "
         "figure can be entered here manually.", {}))
-    findings.append(Finding(
-        "F3", "Reclaim tracking -- prior FY's carried-forward 4B(2) reversals", "INFO",
-        "N/A -- first year of scrutiny in this tool, so there is no prior-FY carry-forward to "
-        "reference. The column is present (not hidden) so next year's tool can populate it once "
-        "this year's own 'Closing Unreclaimed 4B(2) Pool' figure below is manually carried "
-        "forward as that year's opening.", {}))
+    if carry_fwd_gstr9 is not None:
+        findings.append(Finding(
+            "F3", "ITC carried forward from last FY (GSTR-9 Table 13, AUTHORITATIVE/filed)", "INFO",
+            f"{_f(carry_fwd_gstr9)} (CGST {_f(_n(g9.get('table13_itc_cgst')))} + SGST "
+            f"{_f(_n(g9.get('table13_itc_sgst')))} + IGST {_f(_n(g9.get('table13_itc_igst')))} + "
+            f"Cess {_f(_n(g9.get('table13_itc_cess')))}) -- the taxpayer's own filed GSTR-9 Table 13 "
+            f"'ITC availed for the previous financial year' figure: ITC pertaining to PRIOR-FY "
+            f"invoices/debit notes but claimed within THIS FY's own returns (the Section 16(4) "
+            f"carry-forward window). This is an ANNUAL return figure with no month-by-month split "
+            f"in the source itself, so it appears on the FY TOTAL row only. Compare against F2's "
+            f"INFERRED figure above -- vs the computed estimate, difference "
+            f"{_f(carry_fwd_gstr9 - (fy_inferred_cf or 0.0))}. For reference, GSTR-9 "
+            f"Table 12 (reversal of ITC availed during the previous FY) shows "
+            f"{_f(_n(g9.get('table12_itc_reversed_cgst')) + _n(g9.get('table12_itc_reversed_sgst')) + _n(g9.get('table12_itc_reversed_igst')) + _n(g9.get('table12_itc_reversed_cess')))}.",
+            dict(carry_forward_fy_gstr9=carry_fwd_gstr9)))
+    else:
+        findings.append(Finding(
+            "F3", "ITC carried forward from last FY (GSTR-9 Table 13, AUTHORITATIVE/filed)", "SKIPPED",
+            "Not available: GSTR-9 was not supplied as Excel for this taxpayer/FY (this tool "
+            "does not parse a PDF GSTR-9 -- see the classify step), or its Part V (Items 10-14) "
+            "sheet/Table 13 row could not be located. Left blank rather than estimated -- use "
+            "F2's INFERRED (computed) figure above instead, with its own stated limitation.", {}))
+
+    # ---- NEW (per instruction): Table 8A cross-check + usage suggestions ----
+    t8a = ctx.get("table8a") or {}
+    if t8a.get("available"):
+        t8a_total = _n((t8a.get("totals") or {}).get("total"))
+        diff_2a = t8a_total - T["avail_2a"] if any2a else None
+        diff_2b = t8a_total - T["avail_2b"] if any2b else None
+        no_reasons = (t8a.get("totals") or {}).get("no_reason_breakdown") or {}
+        findings.append(Finding(
+            "F1a", "ITC Available cross-check -- Table 8A (government-computed, from 2A, "
+                   "auto-populated into GSTR-9)", "INFO",
+            f"Table 8A FY total: {_f(t8a_total)}. Vs this sheet's 2A figure: "
+            f"{('difference ' + _f(diff_2a)) if diff_2a is not None else 'n/a (2A not available)'}. "
+            f"Vs this sheet's 2B figure: {('difference ' + _f(diff_2b)) if diff_2b is not None else 'n/a (2B not available)'}. "
+            f"A third, independently-computed FY-level figure -- broad agreement across all three "
+            f"(2A, 2B, Table 8A) is a strong consistency signal; a persistent gap against Table 8A "
+            f"specifically points at the 2A-vs-8A reconciliation step itself (filing-status/timing "
+            f"differences between when 2A shows an invoice and when 8A auto-populates it into the "
+            f"annual return) rather than this tool's own computation. Table 8A ALSO carries its own "
+            f"ITC-No reason breakdown -- {len(no_reasons)} distinct reason(s) recorded" +
+            (f", e.g. {list(no_reasons.items())[0][0]!r} ({list(no_reasons.items())[0][1]} invoice(s))"
+             if no_reasons else "") + ". "
+            "SUGGESTIONS for further Table 8A use, not yet built: (1) an invoice-level Table 8A vs "
+            "2B match, the same way this tool already does 2A-vs-2B on the 'GSTR-2A vs 2B Invoice "
+            "Detail' sheet -- would catch invoices GSTN auto-populated into 8A but that never made "
+            "it into 2B, or vice versa; (2) a month-wise Table 8A breakdown if the source ever "
+            "carries a period column (current export is FY-level only, confirmed against this "
+            "taxpayer's real file); (3) cross-tabulating Table 8A's own ITC-No reasons against this "
+            "sheet's 2B-side ITC-No exclusion (this session's fix) to confirm both sources agree on "
+            "which specific invoices are blocked, not just the aggregate total.",
+            dict(table8a_total=t8a_total, diff_vs_2a=diff_2a, diff_vs_2b=diff_2b)))
+    else:
+        findings.append(Finding(
+            "F1a", "ITC Available cross-check -- Table 8A", "SKIPPED",
+            t8a.get("reason") or "Table 8A not supplied for this taxpayer/FY.", {}))
 
     # ---- Credit Ledger tie-out (FY level) ----
     credit = ctx["annual_data"].get("credit") or {}
@@ -633,14 +898,136 @@ def build_itc_annual_summary(ctx):
              "until reclaim tagging exists."],
         ])
 
-    return dict(header=["Month", "ITC Available (2B)", "ITC Claimed (4A)", "Reversed 4B(1)",
-                        "Reversed 4B(2)", "Reclaimed (this FY, of this FY's 4B2)",
-                        "Reclaimed (of prior FY carry-fwd)", "Claimed % of Available",
-                        "4B(1) % of Claimed", "4B(2) % of Claimed"],
-                widths=[10, 18, 18, 16, 16, 22, 20, 16, 14, 14], rows=rows, findings=findings,
-                notes=["Percentage columns show blank rather than an error where the denominator "
-                       "is zero or the source figure isn't available for that month."],
+    return dict(header=["Month", "ITC Available (2A)", "ITC Available (2B) -- PRIMARY (Yes+Unconfirmed, excludes confirmed No)",
+                        "Reversed 4B(1)",
+                        "Reversed 4B(2)", "ITC Availed (Current FY, FULL Table 4A -- Import+RCM+ISD+All-Other)",
+                        "ITC Carried Forward -- INFERRED (Claimed minus [2B Available - 4B1 - 4B2], floored at 0)",
+                        "ITC Carried Forward -- GSTR-9 Table 13 (AUTHORITATIVE/filed, FY TOTAL row only)",
+                        "REFERENCE: 2B if EXCLUDING unconfirmed too (Yes only, strictest)",
+                        "REFERENCE: 2B if INCLUDING everything (Yes+No+Unconfirmed, no exclusion at all)"],
+                widths=[10, 20, 34, 16, 16, 34, 34, 36, 34, 38], rows=rows, findings=findings,
+                notes=["Column order: 2A available, 2B available (PRIMARY), 4B(1) reversed, 4B(2) "
+                       "reversed, current-FY availed, then TWO carry-forward columns side by side "
+                       "(INFERRED and GSTR-9 Table 13), then the TWO REFERENCE 2B figures requested "
+                       "explicitly, at the end of each row.",
+                       "PRIMARY 2B definition (per explicit instruction): every GSTR-2B B2B/CDNR row "
+                       "is classified YES / NO / UNCONFIRMED by its own 'ITC Availability' field. "
+                       "The PRIMARY figure = YES + UNCONFIRMED (excludes only a CONFIRMED No -- an "
+                       "unconfirmed row is not assumed ineligible, since the portal never said it "
+                       "was). The two REFERENCE columns at the end show the same data two other "
+                       "ways: 'excluding unconfirmed too' (Yes only -- the strictest, most "
+                       "conservative reading) and 'including everything' (Yes+No+Unconfirmed -- the "
+                       "loosest, a plain grand total with no eligibility filter at all). All three "
+                       "are computed from the SAME per-row classification, not three separate "
+                       "calculations -- verified for every month: (Yes-only column) + (No, see the "
+                       "'GSTR-2B ITC No & Unconfirmed -- Invoice Detail' sheet) + (Unconfirmed, same "
+                       "sheet) equals the 'including everything' column exactly, and the PRIMARY "
+                       "column equals 'including everything' minus No, exactly -- both checked "
+                       "independently for all 12 months before this was shipped.",
+                       "A REFERENCE column can be NEGATIVE for a given month -- this is correct, not "
+                       "an error: GSTR-2B credit notes reduce ITC (they carry a negative sign in "
+                       "this tool's own convention, matching how a credit note reduces the buyer's "
+                       "ITC), so a month where unconfirmed-status CREDIT notes outweigh unconfirmed-"
+                       "status DEBIT notes will show a negative 'unconfirmed' contribution, and that "
+                       "can pull the 'including everything' column below the PRIMARY figure for that "
+                       "month specifically. The FY TOTAL row is the figure to rely on for the year.",
+                       "Full invoice-level detail for every No and Unconfirmed row (GSTIN, invoice/"
+                       "note number, date, taxable, tax, and the portal's own stated reason where "
+                       "given) is on the 'GSTR-2B ITC No & Unconfirmed -- Invoice Detail' sheet.",
+                       "IMPORTANT, explained per explicit question: the 'ITC Availed' column is "
+                       "the FULL Table 4A (4A(1) imports of goods + 4A(2) imports of services + "
+                       "4A(3) RCM + 4A(4) ISD + 4A(5) all-other) -- it will legitimately be LARGER "
+                       "than the 'ITC 3B vs 2B' sheet's own 'claimed' figure, which is 4A(5) ONLY "
+                       "(deliberately -- imports/RCM/ISD don't originate from any supplier's 2B "
+                       "invoice at all, so that sheet, which exists specifically to compare "
+                       "claimed-vs-2B-invoice-available, only covers the ONE Table 4A sub-head "
+                       "that 2B invoices can actually support). Both figures are correct; they "
+                       "answer different questions -- one is total ITC claimed this FY across every "
+                       "source, the other is the subset checkable against supplier invoices."],
                 extra_tables=[closing_section])
+
+
+def build_2b_no_unconfirmed_detail(ctx):
+    """NEW SHEET (per explicit instruction): complete invoice-level detail of every GSTR-2B
+    B2B/CDNR row whose ITC Availability is confirmed NO (portal-flagged ineligible) or
+    UNCONFIRMED (status could not be read for that row -- see read_2b_invoice_level's own
+    docstring for why this happens on some CDNR rows), across the whole FY. Two separate
+    tables, since they are different categories -- No is a portal statement, Unconfirmed is
+    this tool's own inability to read that one field (the tax amounts on those rows ARE
+    reliable, only the status is unknown).
+
+    ACCURACY CHECK built into this sheet itself (per explicit 'no calculation mistakes' rule):
+    the FY totals shown here for No and Unconfirmed are cross-footed against the exact same
+    per-row classification 'ITC Annual Summary' uses for its own reference columns -- both are
+    read from the SAME underlying read_2b_invoice_level() output, so they cannot diverge by
+    construction, and a total row is provided for both tables so the two can be checked against
+    each other directly, cell for cell, without recomputation."""
+    no_rows, unconf_rows = [], []
+    T_no = T_unconf = 0.0
+    for m in ctx["months"]:
+        two = ctx["twob_by_month"].get(m, {})
+        if not two.get("available"):
+            continue
+        for x in two.get("no_confirmed_rows", []):
+            ref = x.get("invno") if x.get("source") == "B2B" else x.get("note")
+            line_tax = _n(x.get("igst")) + _n(x.get("cgst")) + _n(x.get("sgst")) + _n(x.get("cess"))
+            if x.get("source") == "CDNR" and str(x.get("ntype", "")).strip().upper().startswith("C"):
+                line_tax = -line_tax   # credit note reduces ITC -- same sign convention as the rest of this tool
+            T_no += line_tax
+            no_rows.append([m, x.get("source"), x.get("gstin"), x.get("supplier"), ref,
+                            x.get("date"), round(_n(x.get("taxable")), 2), round(line_tax, 2),
+                            x.get("itc_avail_reason") or ""])
+        for x in two.get("unconfirmed_rows", []):
+            ref = x.get("invno") if x.get("source") == "B2B" else x.get("note")
+            line_tax = _n(x.get("igst")) + _n(x.get("cgst")) + _n(x.get("sgst")) + _n(x.get("cess"))
+            if x.get("source") == "CDNR" and str(x.get("ntype", "")).strip().upper().startswith("C"):
+                line_tax = -line_tax
+            T_unconf += line_tax
+            unconf_rows.append([m, x.get("source"), x.get("gstin"), x.get("supplier"), ref,
+                                x.get("date"), round(_n(x.get("taxable")), 2), round(line_tax, 2),
+                                str(x.get("itc_avail") or "") or "(blank)"])
+    no_rows.sort(key=lambda r: (str(r[0]), str(r[1]), str(r[2])))
+    unconf_rows.sort(key=lambda r: (str(r[0]), str(r[1]), str(r[2])))
+    if no_rows:
+        no_rows.append(["TOTAL", "", "", "", "", "", "", round(T_no, 2), ""])
+    if unconf_rows:
+        unconf_rows.append(["TOTAL", "", "", "", "", "", "", round(T_unconf, 2), ""])
+
+    findings = [Finding(
+        "Z1", "GSTR-2B ITC No & Unconfirmed -- FY summary", "INFO",
+        f"Confirmed NO (portal-flagged ineligible): {len(no_rows) - (1 if no_rows else 0)} row(s), "
+        f"net tax Rs {round(T_no, 2):,.2f}. UNCONFIRMED (status not readable): "
+        f"{len(unconf_rows) - (1 if unconf_rows else 0)} row(s), net tax Rs {round(T_unconf, 2):,.2f}. "
+        f"These two totals are the SAME figures subtracted/added in 'ITC Annual Summary' to move "
+        f"between its PRIMARY, 'Yes only', and 'grand total' columns -- cross-check: "
+        f"(ITC Annual Summary's 'Yes only' column, FY TOTAL) + {round(T_no, 2):,.2f} + "
+        f"{round(T_unconf, 2):,.2f} should equal (ITC Annual Summary's 'grand total' column, FY "
+        f"TOTAL) exactly.",
+        dict(no_total=round(T_no, 2), unconfirmed_total=round(T_unconf, 2)))]
+
+    return dict(header=["Month", "Source", "GSTIN", "Supplier", "Invoice/Note No", "Date",
+                        "Taxable Value (Rs)", "Tax -- IGST+CGST+SGST+Cess (Rs)", "Portal's Stated Reason"],
+                widths=[10, 10, 18, 30, 20, 14, 18, 24, 46], rows=no_rows, findings=findings,
+                notes=["Table above: CONFIRMED NO (portal-flagged ineligible) -- 'Portal's Stated "
+                       "Reason' column carries whatever the source file itself states. Table below: "
+                       "UNCONFIRMED (status could not be read for that row -- 'Portal's Stated "
+                       "Reason' column instead shows the raw, unreadable status text as-is, e.g. "
+                       "'(blank)' or 'NA', for transparency, not a real reason). Tax column sign "
+                       "convention: a credit note's tax is shown NEGATIVE (it reduces ITC), matching "
+                       "this tool's convention everywhere else -- a debit note is positive."],
+                extra_tables=[
+                    dict(title=f"UNCONFIRMED Status -- Complete Detail ({len(unconf_rows) - (1 if unconf_rows else 0)} row(s))",
+                         subtitle="ITC Availability status could not be read for these rows (see this "
+                                  "sheet's own notes above for why) -- the taxable/tax figures ARE "
+                                  "reliable (verified: NoteValue = Taxable+Tax reconciles exactly for "
+                                  "a sample of these rows), only the eligibility STATUS is unknown. "
+                                  "Currently counted as available (Yes+Unconfirmed) in the PRIMARY "
+                                  "ITC Available figure, per explicit instruction.",
+                         header=["Month", "Source", "GSTIN", "Supplier", "Invoice/Note No", "Date",
+                                "Taxable Value (Rs)", "Tax -- IGST+CGST+SGST+Cess (Rs)", "Raw Status Text"],
+                         widths=[10, 10, 18, 30, 20, 14, 18, 24, 20], rows=unconf_rows,
+                         empty_note="No rows with unconfirmed ITC Availability status this FY."),
+                ])
 
 
 def build_zero_tax_scan(ctx):
@@ -1156,14 +1543,23 @@ def build_itc_3b_vs_2b(ctx):
     rows, findings = [], []
     T = defaultdict(float)
     any2b = False
+    any_summ_available = False
     for m in ctx["months"]:
         g3b = ctx["g3b_by_month"].get(m, {})
         claimed = sum(_n(x) for x in (g3b.get("4A5") or [])[:4])
         two = ctx["twob_by_month"].get(m, {})
         summ = ctx["twob_summary_by_month"].get(m, {})
+        # Uses '_summary_available' (the narrower 'was the ITC Available/control-total sheet
+        # itself readable' signal), NOT the broader 'available' flag -- see summary_for_month's
+        # own docstring for why these are now two different questions. This check specifically
+        # needs the narrow one: it's comparing against the SUMMARY sheet's own control total,
+        # which can be genuinely absent even when the invoice-level B2B/CDNR data (used by
+        # 'avail' below, from ctx['twob_by_month'], a completely separate read) is fully present.
         summ_val = (sum(_n(summ.get(k)) for k in ("ITC_all_other_IGST", "ITC_all_other_CGST",
                                                   "ITC_all_other_SGST", "ITC_all_other_CESS"))
-                    if summ.get("available") else None)
+                    if summ.get("_summary_available") else None)
+        if summ.get("_summary_available"):
+            any_summ_available = True
         if two.get("available"):
             any2b = True
             avail = two["itc"] + two["cn_itc"]
@@ -1175,39 +1571,65 @@ def build_itc_3b_vs_2b(ctx):
             rows.append([m, claimed, None, None, None, None, summ_val, None])
             T["claimed"] += claimed
     if any2b:
+        # BUG FIX (same class already fixed elsewhere -- Turnover Growth vs Tax, FY-Total vs
+        # BIFA -- found again here while cross-checking this exact sheet against a taxpayer's
+        # own manual verification): T['summ'] silently collapses to 0 when NO month's 'ITC
+        # Available' summary sheet was available at all (confirmed real: this taxpayer's GSTR-2B
+        # export has no 'ITC Available' sheet whatsoever), and that fake 0 was then shown in F7a
+        # as if it were a genuine computed summary-sheet total, against the real invoice-level
+        # figure -- producing a huge, meaningless 'difference' that's actually just 'the source
+        # sheet doesn't exist', not a reconciliation gap. Fixed: FY TOTAL row and F7a both now
+        # distinguish 'summary genuinely summed to zero' from 'summary sheet never existed'.
         rows.append(["FY TOTAL", T["claimed"], T["avail"], T["claimed"] - T["avail"],
-                     None, None, T["summ"], T["avail"] - T["summ"]])
+                     None, None, (T["summ"] if any_summ_available else None),
+                     ((T["avail"] - T["summ"]) if any_summ_available else None)])
         d = T["claimed"] - T["avail"]
         findings.append(Finding(
-            "F7", "ITC claimed in GSTR-3B 4A(5) vs ITC available in GSTR-2B (invoice level)",
+            "F7", "ITC claimed in GSTR-3B 4A(5) [All-Other ITC only, NOT full Table 4A] vs ITC available in GSTR-2B",
             "FLAG" if d > MATERIAL else ("REVIEW" if abs(d) > MATERIAL else "PASS"),
-            f"FY ITC claimed under Table 4A(5) {_f(T['claimed'])}; FY ITC available per GSTR-2B "
+            f"FY ITC claimed under Table 4A(5) 'All other ITC' SPECIFICALLY {_f(T['claimed'])} -- "
+            f"NOT the full Table 4A total (which also includes 4A(1) imports of goods, 4A(2) "
+            f"imports of services, 4A(3) RCM, 4A(4) ISD -- see the 'ITC Annual Summary' sheet "
+            f"for that full figure, which will legitimately be larger than this one). Scoped to "
+            f"4A(5) here deliberately: this sheet compares claimed ITC against GSTR-2B's "
+            f"INVOICE-level data, and imports/RCM/ISD don't originate from any supplier's 2B "
+            f"invoice at all, so only 4A(5) is the sub-head 2B invoices can actually be checked "
+            f"against. FY ITC available per GSTR-2B "
             f"computed from the invoice-level B2B and B2B-CDNR rows (net of B2BA/B2B-CDNRA "
             f"amendments -- see the '_read_b2ba_amendments' fix) {_f(T['avail'])}; "
             f"difference {_f(d)}"
             + (" -- claimed EXCEEDS available, which is an excess-credit exposure under "
                "section 16(2)(aa) read with Rule 36(4)." if d > MATERIAL else "."),
             dict(claimed_3b=T["claimed"], available_2b=T["avail"], difference=d)))
-        ds = T["avail"] - T["summ"]
-        if abs(ds) > TOL:
+        if not any_summ_available:
             findings.append(Finding(
-                "F7a", "GSTR-2B summary sheet vs invoice-level total -- residual difference", "INFO",
-                f"The 'ITC Available' summary sheet in the merged GSTR-2B workbook yields "
-                f"{_f(T['summ'])} for the year, against {_f(T['avail'])} computed from the "
-                f"invoice-level rows (B2B + B2B-CDNR, net of B2BA/B2B-CDNRA amendments) -- a "
-                f"difference of {_f(ds)}. BUG FIX applied: this summary sheet lays four "
-                f"column-groups side by side per row (month 1, month 2, month 3, quarter total) "
-                f"and used to be read by always taking the first group, so months 2 and 3 of "
-                f"every quarter showed month-1's figures -- that misread is now corrected (the "
-                f"right column-group is selected per month, with a built-in month1+2+3-vs-total "
-                f"sanity check). The residual difference shown here is NOT that bug -- likely "
-                f"causes are 2B summary components this module doesn't feed into the "
-                f"invoice-level figure at all (ISD credit, import of goods/services), or a "
-                f"quarter-total column in the source file that doesn't itself foot to its own "
-                f"three months (see '_qtr_total_mismatch' if flagged). Every 2B figure elsewhere "
-                f"in this module is taken from the invoice rows; this summary figure is shown "
-                f"only as a control total, never used in a calculation.",
-                dict(summary_path=T["summ"], invoice_level=T["avail"], difference=ds)))
+                "F7a", "GSTR-2B summary sheet vs invoice-level total -- residual difference", "SKIPPED",
+                "Not computable: this taxpayer's merged GSTR-2B workbook has no 'ITC Available' "
+                "summary sheet at all (confirmed -- not every real export includes it; some carry "
+                "only 'B2B'+'B2B-CDNR'). There is no summary-sheet figure to compare against the "
+                "invoice-level total in F7 above, which is unaffected -- it never depended on this "
+                "summary sheet.", {}))
+        else:
+            ds = T["avail"] - T["summ"]
+            if abs(ds) > TOL:
+                findings.append(Finding(
+                    "F7a", "GSTR-2B summary sheet vs invoice-level total -- residual difference", "INFO",
+                    f"The 'ITC Available' summary sheet in the merged GSTR-2B workbook yields "
+                    f"{_f(T['summ'])} for the year, against {_f(T['avail'])} computed from the "
+                    f"invoice-level rows (B2B + B2B-CDNR, net of B2BA/B2B-CDNRA amendments) -- a "
+                    f"difference of {_f(ds)}. BUG FIX applied: this summary sheet lays four "
+                    f"column-groups side by side per row (month 1, month 2, month 3, quarter total) "
+                    f"and used to be read by always taking the first group, so months 2 and 3 of "
+                    f"every quarter showed month-1's figures -- that misread is now corrected (the "
+                    f"right column-group is selected per month, with a built-in month1+2+3-vs-total "
+                    f"sanity check). The residual difference shown here is NOT that bug -- likely "
+                    f"causes are 2B summary components this module doesn't feed into the "
+                    f"invoice-level figure at all (ISD credit, import of goods/services), or a "
+                    f"quarter-total column in the source file that doesn't itself foot to its own "
+                    f"three months (see '_qtr_total_mismatch' if flagged). Every 2B figure elsewhere "
+                    f"in this module is taken from the invoice rows; this summary figure is shown "
+                    f"only as a control total, never used in a calculation.",
+                    dict(summary_path=T["summ"], invoice_level=T["avail"], difference=ds)))
     else:
         findings.append(Finding("F7", "ITC claimed in GSTR-3B vs available in GSTR-2B", "SKIPPED",
                                 "GSTR-2B not supplied for any month.", {}))
@@ -2809,16 +3231,372 @@ def build_r2a_isd_164_cancelled(ctx):
                        "all -- see the GSTR-2A Data Quality sheet's G-NF1 finding."])
 
 
+def build_cn_dn_impact_data(ctx):
+    """NEW (per explicit instruction): whole-FY, invoice-level detail of every credit/debit
+    note this taxpayer both RECEIVED (inward, GSTR-2B B2B-CDNR) and ISSUED (outward, GSTR-1
+    CDNR), grouped into the four combinations that matter for who owes what. Feeds the
+    'CN-DN ITC Impact - Annual' sheet (a custom multi-table writer in master_build.py, not the
+    single-table SHEETS mechanism, since this genuinely needs four separate tables plus a net
+    summary rather than one).
+
+    Direction of impact, per GST law (credit/debit notes under Sec 34, ITC reversal under Sec
+    16(2) read with CGST Rule 37 and the corresponding provisions):
+    - INWARD Credit Note (received from a supplier): the value of what THIS taxpayer purchased
+      went DOWN -- this taxpayer must reverse the proportionate ITC it had claimed.
+    - INWARD Debit Note (received from a supplier): the value of what THIS taxpayer purchased
+      went UP -- this taxpayer becomes eligible for additional ITC.
+    - OUTWARD Credit Note (issued to a customer): the value of what THIS taxpayer sold went
+      DOWN -- this taxpayer's own output tax liability is already correspondingly reduced in
+      its own GSTR-1/GSTR-3B (nothing further for THIS taxpayer to do about its own liability),
+      but the RECIPIENT is required to reverse the ITC they had claimed on the original invoice.
+    - OUTWARD Debit Note (issued to a customer): the value of what THIS taxpayer sold went UP
+      -- this taxpayer's own output tax liability is already correspondingly increased in its
+      own GSTR-1/GSTR-3B, and the RECIPIENT becomes eligible for additional ITC.
+
+    Only the INWARD side is this taxpayer's own compliance action (ties directly to GSTR-3B
+    4(B)(2) -- see the 'D2. ITC Reversal' section on each month's Comparison sheet); the
+    OUTWARD side's ITC consequence belongs to the counterparty, and is included here as
+    documented, attributable information (GSTIN, trade name, exact amount) rather than
+    something this taxpayer can be shown as non-compliant on -- this tool has no visibility
+    into whether the counterparty actually reversed/claimed as required."""
+    self_gstin = ctx.get("self_gstin", "")
+    company_name = ctx.get("company_name", "") or "(self)"
+    lookup = ctx.get("gstin_name_lookup", {}) or {}
+
+    def _n(v):
+        try:
+            return float(v) if v is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    inward = []
+    for m in ctx.get("months", []):
+        two = ctx.get("twob_by_month", {}).get(m, {}) or {}
+        for c in two.get("cdnr", []) or []:
+            gstin = str(c.get("gstin", "") or "").strip()
+            name = str(c.get("supplier", "") or "").strip() or lookup.get(gstin, "")
+            ntype = str(c.get("ntype", "") or "").strip()
+            is_credit = ntype.upper().startswith("C")
+            inward.append(dict(
+                month=m, direction="Inward (received)", gstin=gstin, name=name,
+                note=str(c.get("note", "") or "").strip(), ntype="Credit Note" if is_credit else "Debit Note",
+                date=str(c.get("date", "") or "").strip(),
+                taxable=_n(c.get("taxable")), igst=_n(c.get("igst")), cgst=_n(c.get("cgst")),
+                sgst=_n(c.get("sgst")), cess=_n(c.get("cess")), itc_avail=str(c.get("itc_avail", "") or "").strip(),
+                tax_total=_n(c.get("igst")) + _n(c.get("cgst")) + _n(c.get("sgst")) + _n(c.get("cess")),
+                is_credit=is_credit,
+                action=(f"{company_name} (GSTIN {self_gstin}) must REVERSE ITC previously claimed "
+                        f"on the related purchase from {name or 'this supplier'} (GSTIN {gstin}), "
+                        f"due to this credit note."
+                        if is_credit else
+                        f"{company_name} (GSTIN {self_gstin}) becomes eligible for ADDITIONAL ITC "
+                        f"on the related purchase from {name or 'this supplier'} (GSTIN {gstin}), "
+                        f"due to this debit note -- ensure it is included in the ITC claimed."),
+            ))
+
+    outward = []
+    for x in ctx.get("g1_cdnr_fy", []) or []:
+        gstin = str(x.get("gstin", "") or "").strip()
+        name = lookup.get(gstin, "")
+        ntype = str(x.get("notetype", "") or "").strip()
+        is_credit = ntype.upper().startswith("C")
+        outward.append(dict(
+            month=x.get("month", ""), direction="Outward (issued)", gstin=gstin, name=name,
+            note=str(x.get("noteno", "") or "").strip(), ntype="Credit Note" if is_credit else "Debit Note",
+            date="",
+            taxable=_n(x.get("taxable")), igst=_n(x.get("igst")), cgst=_n(x.get("cgst")),
+            sgst=_n(x.get("sgst")), cess=0.0,
+            tax_total=_n(x.get("igst")) + _n(x.get("cgst")) + _n(x.get("sgst")),
+            is_credit=is_credit,
+            action=(f"{company_name}'s own output tax liability is already reduced accordingly "
+                    f"in its own GSTR-1/GSTR-3B. The RECIPIENT, {name or '(name not resolved)'} "
+                    f"(GSTIN {gstin}), is required to REVERSE the ITC it had claimed on the "
+                    f"related original invoice, due to this credit note."
+                    if is_credit else
+                    f"{company_name}'s own output tax liability is already increased accordingly "
+                    f"in its own GSTR-1/GSTR-3B. The RECIPIENT, {name or '(name not resolved)'} "
+                    f"(GSTIN {gstin}), becomes eligible for ADDITIONAL ITC, due to this debit note."),
+        ))
+
+    # Net summary -- only the inward side is THIS taxpayer's own actionable ITC impact; matches
+    # the "Yes"/"Unconfirmed" convention used everywhere else in this tool (an unconfirmed row
+    # is not assumed ineligible; only a CONFIRMED "No" is excluded from the actionable total).
+    inward_actionable = [r for r in inward if r["itc_avail"].strip().upper() != "NO"]
+    inward_cn_tax = sum(r["tax_total"] for r in inward_actionable if r["is_credit"])
+    inward_dn_tax = sum(r["tax_total"] for r in inward_actionable if not r["is_credit"])
+    net_itc_reversal_required = round(inward_cn_tax - inward_dn_tax, 2)
+    outward_cn_tax = sum(r["tax_total"] for r in outward if r["is_credit"])
+    outward_dn_tax = sum(r["tax_total"] for r in outward if not r["is_credit"])
+
+    return dict(
+        self_gstin=self_gstin, company_name=company_name,
+        inward=inward, outward=outward,
+        net_itc_reversal_required=net_itc_reversal_required,
+        inward_cn_tax=round(inward_cn_tax, 2), inward_dn_tax=round(inward_dn_tax, 2),
+        outward_cn_tax=round(outward_cn_tax, 2), outward_dn_tax=round(outward_dn_tax, 2),
+    )
+
+
+def build_itc_detailed_recon_data(ctx):
+    """NEW (per explicit, very detailed instruction): whole-FY, tax-head-wise, invoice-level
+    ITC reconciliation -- one row per month plus an FY TOTAL row -- feeding a new table
+    appended to the existing 'ITC Annual Summary' sheet (below its current content, per the
+    established pattern this session; NOT a second sheet).
+
+    Every figure below is computed FRESH from invoice-level B2B/B2B-CDNR (2B) and B2B (2A)
+    rows already available via ctx -- per explicit instruction, NEITHER the 2B summary
+    ('ITC Available'/'ITC not available') sheets NOR any pre-aggregated total is used as a
+    source for the '2B (Yes only)' or '2A (all invoices)' lines; both are built by summing the
+    real invoice rows, tax-head by tax-head.
+
+    Deliberate design choices, stated here rather than left implicit:
+    - '2B (Available=Yes only)' is STRICT Yes-status only (excludes both No AND Unconfirmed)
+      -- this is a narrower filter than the Yes+Unconfirmed convention this tool uses
+      elsewhere (e.g. Section D's fallback), used here because the instruction explicitly
+      names 'Available=Yes only'.
+    - 2A and 2B are never netted together (per instruction) -- 2A feeds ONLY the Mismatch
+      columns, 2B(Yes) is the sole eligibility baseline everything else builds from.
+    - Mismatch matching key is deliberately strict: (invoice number, supplier GSTIN, invoice
+      value, IGST, CGST, SGST, CESS, invoice date) -- an invoice that exists in both sources
+      but differs on ANY of these fields counts as unmatched on that side, not a false "same
+      invoice" match on invoice number + GSTIN alone.
+    - Credit/Debit Note impact uses the SAME Yes-only convention as the 2B baseline, for
+      internal consistency within this one table.
+    - 'ITC carried forward from last FY' has no dedicated GSTR-3B field in this data source
+      (confirmed: no such field is parsed anywhere in this tool) -- computed the same way
+      the existing 'ITC Annual Summary' sheet's own inferred-carry-forward column already
+      does (claimed exceeding what this FY's own 2B+reversals support), stated as INFERRED,
+      not read directly, and cross-checked against GSTR-9 Table 13 at FY level when available.
+    - If GSTR-3B is not available for a month, 'Actual ITC claimed' and 'Excess/Short claim'
+      are left as None (rendered blank) and Remarks says so explicitly -- never a computed
+      false discrepancy against a missing source."""
+    HEADS = ("IGST", "CGST", "SGST", "CESS")
+
+    def _z():
+        return [0.0, 0.0, 0.0, 0.0]
+
+    def _norm_date(v):
+        """BUG FIX (found during verification, before this table was ever shipped): 2A's
+        invdate arrives as an ISO string ('2023-05-23', from r2a_clean_date) while 2B's date
+        arrives as a DD/MM/YYYY string ('23/05/2023', unparsed from the raw cell text) --
+        same calendar date, two different string shapes. Comparing those strings directly in
+        the composite key made EVERY genuinely-matching invoice look unmatched (confirmed on
+        a real invoice, SIEPL-INV-79, present in both sources with identical GSTIN/value/tax
+        heads, differing only in this string format) -- a near-100% false mismatch rate every
+        month. Normalizes both shapes (plus a defensive date/datetime object case) to one
+        canonical ISO string before the key is ever built."""
+        if v is None or v == "":
+            return ""
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        s = str(v).strip()
+        m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", s)
+        if m:
+            return s
+        m = re.match(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$", s)
+        if m:
+            dd, mm, yyyy = m.groups()
+            return f"{yyyy}-{int(mm):02d}-{int(dd):02d}"
+        return s
+
+    def _key(invno, gstin, invval, igst, cgst, sgst, cess, invdate):
+        return (str(invno or "").strip().upper(), str(gstin or "").strip().upper(),
+                round(_n(invval), 2), round(_n(igst), 2), round(_n(cgst), 2),
+                round(_n(sgst), 2), round(_n(cess), 2), _norm_date(invdate))
+
+    r2a = ctx.get("r2a_data") or {}
+    r2a_b2b_by_month = r2a.get("b2b", {}) if r2a.get("available") else {}
+    rows = []
+    FT = dict(b2b=_z(), a2a=_z(), cn=_z(), dn=_z(), net=_z(), claimed=_z(), cf=_z(), exs=_z(),
+              mism_2a_not_2b_ct=0, mism_2a_not_2b_val=0.0, mism_2b_not_2a_ct=0, mism_2b_not_2a_val=0.0)
+    any_g3b = False
+
+    for m in ctx["months"]:
+        two = ctx["twob_by_month"].get(m, {})
+        b2b_rows = two.get("rows", []) if two.get("available") else []
+        cdnr_rows = two.get("cdnr", []) if two.get("available") else []
+
+        # ---- 2B (Yes only), tax-head-wise, summed directly from B2B invoice rows ----
+        b2b_yes = [r for r in b2b_rows if str(r.get("itc_avail", "")).strip().upper() == "YES"]
+        b2b_sum = [round(sum(_n(r.get(h.lower())) for r in b2b_yes), 2) for h in HEADS]
+
+        # ---- 2A (all invoices), tax-head-wise, summed directly from B2B invoice rows ----
+        a2a_rows = r2a_b2b_by_month.get(m, [])
+        a2a_sum = [round(sum(_n(r.get(h.lower())) for r in a2a_rows), 2) for h in HEADS]
+
+        # ---- Mismatch: invoice-level, strict composite key, both directions ----
+        def _agg_by_invoice(rows_in):
+            agg = {}
+            for r in rows_in:
+                k = (str(r.get("invno", "")).strip().upper(), str(r.get("gstin", "")).strip().upper())
+                a = agg.setdefault(k, dict(invval=0.0, igst=0.0, cgst=0.0, sgst=0.0, cess=0.0,
+                                            invdate=r.get("invdate") or r.get("date")))
+                a["invval"] = _n(r.get("invval"))  # invoice-level, not summed across rate-lines
+                a["igst"] += _n(r.get("igst")); a["cgst"] += _n(r.get("cgst"))
+                a["sgst"] += _n(r.get("sgst")); a["cess"] += _n(r.get("cess"))
+            return agg
+
+        b2b_by_inv = _agg_by_invoice(b2b_yes)
+        a2a_by_inv = _agg_by_invoice(a2a_rows)
+        b2b_keys = {_key(k[0], k[1], v["invval"], v["igst"], v["cgst"], v["sgst"], v["cess"], v["invdate"])
+                    for k, v in b2b_by_inv.items()}
+        a2a_keys = {_key(k[0], k[1], v["invval"], v["igst"], v["cgst"], v["sgst"], v["cess"], v["invdate"])
+                    for k, v in a2a_by_inv.items()}
+        a2a_not_b2b = a2a_keys - b2b_keys
+        b2b_not_a2a = b2b_keys - a2a_keys
+        # value of the mismatched invoices = sum of their (igst+cgst+sgst+cess) from the key tuple
+        val_a2a_not_b2b = round(sum(k[3] + k[4] + k[5] + k[6] for k in a2a_not_b2b), 2)
+        val_b2b_not_a2a = round(sum(k[3] + k[4] + k[5] + k[6] for k in b2b_not_a2a), 2)
+
+        # ---- Credit/Debit Note impact (2B CDNR, Yes-only, tax-head-wise) ----
+        cdnr_yes = [r for r in cdnr_rows if str(r.get("itc_avail", "")).strip().upper() == "YES"]
+        cn_rows = [r for r in cdnr_yes if str(r.get("ntype", "")).strip().upper().startswith("C")]
+        dn_rows = [r for r in cdnr_yes if str(r.get("ntype", "")).strip().upper().startswith("D")]
+        cn_sum = [round(sum(_n(r.get(h.lower())) for r in cn_rows), 2) for h in HEADS]
+        dn_sum = [round(sum(_n(r.get(h.lower())) for r in dn_rows), 2) for h in HEADS]
+
+        # ---- Net ITC eligible = 2B(Yes) + DN - CN, tax-head-wise ----
+        net_sum = [round(b2b_sum[i] + dn_sum[i] - cn_sum[i], 2) for i in range(4)]
+
+        # ---- Actual ITC claimed (GSTR-3B Table 4A), tax-head-wise ----
+        g3b = ctx["g3b_by_month"].get(m, {})
+        ex = ctx["g3b_extra_by_month"].get(m, {})
+        g3b_available = bool(g3b) or bool(ex.get("available"))
+        claimed_sum = cf_sum = exs_sum = [None, None, None, None]
+        b1_sum = b2_sum = _z()
+        if g3b_available:
+            any_g3b = True
+            a1 = (ex.get("A1") or [0, 0, 0, 0]); a2 = (ex.get("A2") or [0, 0, 0, 0])
+            a3 = (g3b.get("4A3") or [0, 0, 0, 0]); a4 = (ex.get("A4") or [0, 0, 0, 0])
+            a5 = (g3b.get("4A5") or [0, 0, 0, 0])
+            claimed_sum = [round(_n(a1[i]) + _n(a2[i]) + _n(a3[i]) + _n(a4[i]) + _n(a5[i]), 2) for i in range(4)]
+            b1_sum = [_n(x) for x in (g3b.get("4B1") or [0, 0, 0, 0])]
+            b2_sum = [_n(x) for x in (g3b.get("4B2") or [0, 0, 0, 0])]
+            # INFERRED carry-forward, per head: excess of claimed over what THIS FY's own
+            # 2B(Yes)+reversals support -- same formula as the existing 'ITC Annual Summary'
+            # sheet's own inferred-CF column, applied per tax-head here instead of combined.
+            cf_sum = [round(max(0.0, claimed_sum[i] - (b2b_sum[i] - b1_sum[i] - b2_sum[i])), 2) for i in range(4)]
+            exs_sum = [round(claimed_sum[i] - net_sum[i], 2) for i in range(4)]
+
+        remark = ""
+        if not g3b_available:
+            remark = "Reconciliation only — no 3B comparison (GSTR-3B not supplied for this month)."
+        else:
+            exs_total = sum(exs_sum)
+            cn_total = sum(cn_sum)
+            if exs_total > 0 and cn_total != 0:
+                remark = ("FLAG: Excess ITC claimed vs eligible, AND a credit-note reversal exists this "
+                          "period — verify the credit-note-related ITC reversal was actually applied "
+                          "before this excess is treated as a genuine over-claim.")
+            elif exs_total > 0:
+                remark = "Excess ITC claimed vs eligible this period — verify."
+
+        rows.append(dict(month=m, b2b=b2b_sum, a2a=a2a_sum, cn=cn_sum, dn=dn_sum, net=net_sum,
+                          claimed=claimed_sum, cf=cf_sum, exs=exs_sum, remark=remark,
+                          mism_a2a_not_b2b_ct=len(a2a_not_b2b), mism_a2a_not_b2b_val=val_a2a_not_b2b,
+                          mism_b2b_not_a2a_ct=len(b2b_not_a2a), mism_b2b_not_a2a_val=val_b2b_not_a2a,
+                          g3b_available=g3b_available))
+
+        for i in range(4):
+            FT["b2b"][i] += b2b_sum[i]; FT["a2a"][i] += a2a_sum[i]
+            FT["cn"][i] += cn_sum[i]; FT["dn"][i] += dn_sum[i]; FT["net"][i] += net_sum[i]
+            if g3b_available:
+                FT["claimed"][i] += claimed_sum[i]; FT["cf"][i] += cf_sum[i]; FT["exs"][i] += exs_sum[i]
+        FT["mism_2a_not_2b_ct"] += len(a2a_not_b2b); FT["mism_2a_not_2b_val"] += val_a2a_not_b2b
+        FT["mism_2b_not_2a_ct"] += len(b2b_not_a2a); FT["mism_2b_not_2a_val"] += val_b2b_not_a2a
+
+    ft_remark = ""
+    if any_g3b:
+        exs_total = sum(FT["exs"])
+        cn_total = sum(FT["cn"])
+        if exs_total > 0 and cn_total != 0:
+            ft_remark = "FLAG: FY-level excess claim alongside non-zero credit-note impact — verify."
+        elif exs_total > 0:
+            ft_remark = "FY-level excess ITC claimed vs eligible — verify."
+    else:
+        ft_remark = "Reconciliation only — no 3B comparison (GSTR-3B not supplied for any month)."
+
+    rows.append(dict(month="FY TOTAL", b2b=[round(x, 2) for x in FT["b2b"]],
+                      a2a=[round(x, 2) for x in FT["a2a"]], cn=[round(x, 2) for x in FT["cn"]],
+                      dn=[round(x, 2) for x in FT["dn"]], net=[round(x, 2) for x in FT["net"]],
+                      claimed=([round(x, 2) for x in FT["claimed"]] if any_g3b else [None]*4),
+                      cf=([round(x, 2) for x in FT["cf"]] if any_g3b else [None]*4),
+                      exs=([round(x, 2) for x in FT["exs"]] if any_g3b else [None]*4),
+                      remark=ft_remark,
+                      mism_a2a_not_b2b_ct=FT["mism_2a_not_2b_ct"], mism_a2a_not_b2b_val=round(FT["mism_2a_not_2b_val"], 2),
+                      mism_b2b_not_a2a_ct=FT["mism_2b_not_2a_ct"], mism_b2b_not_a2a_val=round(FT["mism_2b_not_2a_val"], 2),
+                      g3b_available=any_g3b, is_fy_total=True))
+    return rows
+
+
+def build_itc_yearly_slim(ctx):
+    """NEW SHEET (per explicit request, feature #3 in the bug-fix/feature list) -- a dedicated,
+    single-row-per-FY summary with exactly the six columns asked for: ITC Available (2A), ITC
+    Available (2B), Reversed 4B(1), Reversed 4B(2), ITC Availed (Current FY), and ITC Availed via
+    Carry-Forward from Last FY. Deliberately calls build_itc_annual_summary(ctx) and reads its FY
+    TOTAL row rather than recomputing anything independently -- the two sheets are guaranteed to
+    agree by construction, never a second, possibly-diverging calculation of the same figures.
+    This sheet is a SLIM, FY-only complement to 'ITC Annual Summary' (which keeps the full
+    month-by-month breakdown and reference columns) -- nothing in that sheet was removed."""
+    full = build_itc_annual_summary(ctx)
+    fy_row = next((r for r in full["rows"] if r[0] == "FY TOTAL"), None)
+    findings = []
+    if fy_row is None:
+        findings.append(Finding("F1-SLIM", "ITC Yearly Summary could not be built", "INFO",
+                                 "The 'ITC Annual Summary' sheet's own FY TOTAL row was not found "
+                                 "-- see that sheet for the underlying reason.", {}))
+        return dict(header=["Status"], widths=[120], rows=[["SKIPPED -- see Finding F1-SLIM."]],
+                    findings=findings, notes=[])
+    # fy_row = [Month, avail_2a, avail_2b, b1, b2, claimed, inferred_cf, carry_fwd_gstr9, yes_only, grand_total]
+    _, avail_2a, avail_2b, b1, b2, claimed, inferred_cf, carry_fwd_gstr9, _, _ = fy_row
+    # Per instruction, column 6 is ONE figure, not two -- default to the GSTR-9 Table 13 figure
+    # when the taxpayer's own filed annual return supplies it (authoritative, filed data beats a
+    # same-FY-only inferred estimate); fall back to the inferred figure only when GSTR-9 wasn't
+    # supplied. Both are still shown side by side in 'ITC Annual Summary' itself for anyone who
+    # wants the full picture -- this sheet is a slim single answer per the request.
+    if carry_fwd_gstr9 is not None:
+        cf_value, cf_source = carry_fwd_gstr9, "GSTR-9 Table 13 (authoritative, filed)"
+    else:
+        cf_value, cf_source = inferred_cf, "INFERRED (GSTR-9 not supplied -- see 'ITC Annual Summary')"
+    rows = [[
+        (round(avail_2a, 2) if avail_2a is not None else None),
+        (round(avail_2b, 2) if avail_2b is not None else None),
+        round(b1, 2), round(b2, 2), round(claimed, 2),
+        (round(cf_value, 2) if cf_value is not None else None),
+    ]]
+    notes = [
+        f"Carry-forward column source: {cf_source}.",
+        "Every figure on this sheet is read directly from 'ITC Annual Summary''s own FY TOTAL "
+        "row (not recalculated) -- the two sheets always agree; see that sheet for the full "
+        "month-by-month breakdown, both carry-forward methods side by side, and the underlying "
+        "methodology notes.",
+        ("2A available" if avail_2a is not None else "2A available: GSTR-2A was not supplied for this run.") ,
+        ("2B available" if avail_2b is not None else "2B available: GSTR-2B was not supplied for this run."),
+    ]
+    return dict(
+        header=["ITC Available (2A)", "ITC Available (2B)", "Reversed 4B(1)", "Reversed 4B(2)",
+                "ITC Availed (Current FY)", "ITC Availed via Carry-Forward from Last FY"],
+        widths=[22, 22, 18, 18, 24, 34], rows=rows, findings=findings, notes=notes)
+
+
 SHEETS = [
     ("Purchase vs Sales & Stock", build_purchase_sales_stock,
      "F1 -- purchase against sales in MONEY terms, monthly and cumulative. GSTR-2B carries no "
      "quantity column, so no quantity-based stock figure can be derived from GST returns; this is "
      "a value flow, shown against the audited inventory movement for context."),
+    ("ITC Yearly Summary", build_itc_yearly_slim,
+     "Dedicated single-row FY summary: ITC Available (2A), ITC Available (2B), Reversed 4B(1), "
+     "Reversed 4B(2), ITC Availed (Current FY), ITC Availed via Carry-Forward from Last FY -- "
+     "sourced from 'ITC Annual Summary''s own FY TOTAL row, so the two always agree."),
     ("ITC Annual Summary", build_itc_annual_summary,
      "FY-level ITC lifecycle -- Available (2B) -> Claimed (4A) -> Reversed (4B1/4B2) -> Reclaimed "
      "(this-FY tracking not available; prior-FY N/A, first year) -- plus Credit and Cash Ledger "
      "FY-level tie-outs and a Closing Balances section for manual carry-forward into next year's "
      "tool. Scoped to this FY only; no multi-year logic."),
+    ("GSTR-2B ITC No & Unconfirmed", build_2b_no_unconfirmed_detail,
+     "Complete invoice-level detail of every GSTR-2B B2B/CDNR row flagged ITC=No or with an "
+     "unconfirmed eligibility status, whole FY -- the underlying detail behind ITC Annual "
+     "Summary's PRIMARY/Yes-only/grand-total reference columns."),
     ("Zero-Tax Invoice Scan", build_zero_tax_scan,
      "Every invoice/movement with a real value but nil tax, across GSTR-1, GSTR-2B, and both "
      "e-way bill directions -- one table per source, heading-wise."),
@@ -2913,6 +3691,19 @@ def build_context(months, res, month_results, annual_data, ewb_out_rows, ewb_in_
         for x in twob[m].get("rows", []):
             twob_lines_fy.append(dict(x, month=m))
 
+    # NEW: outward credit/debit notes (GSTR-1's own cdnr sheet), whole FY, flat list with each
+    # row tagged by month -- feeds the new CN/DN ITC Impact sheet (inward side already available
+    # per-month via twob[m]['cdnr'], see read_2b_invoice_level() above; this is its outward
+    # counterpart). _cdnr_rows_by_month() already reads and forward-fills the WHOLE merged file
+    # in one call (it internally splits by month itself), so only needs one representative path.
+    g1_cdnr_fy = []
+    _g1_cdnr_path = next((res["gstr1_month_map"].get(m) for m in months if res["gstr1_month_map"].get(m)), None)
+    if _g1_cdnr_path:
+        _g1_cdnr_by_month = hfc._cdnr_rows_by_month(_g1_cdnr_path)
+        for m in months:
+            for x in _g1_cdnr_by_month.get(m, []):
+                g1_cdnr_fy.append(dict(x, month=m))
+
     # NEW: Potential Blocked Credits cross-link data (see docstring above) -- never raises;
     # degrades to empty (which build_itc_rollforward's cross-link finding reports as SKIPPED)
     # exactly like every other optional source in this tool.
@@ -2927,6 +3718,15 @@ def build_context(months, res, month_results, annual_data, ewb_out_rows, ewb_in_
             blocked_credit_rows, blocked_credit_totals = _bcred.scan(_by_month, _master)
         except Exception:
             blocked_credit_rows, blocked_credit_totals = [], {}
+
+    # NEW: GSTR-1's own HSN summary, whole-FY, by month -- same source/method
+    # master_build.py already uses for Machinery HSN Scan, now also available via ctx so
+    # build_purchase_sales_stock can use it for the inward-EWB-vs-outward-GSTR1 HSN comparison.
+    g1_hsn_by_month = {}
+    for g1f in {res["gstr1_month_map"].get(m) for m in months} - {None}:
+        hsn_all = hfc._hsn_rows_by_month(g1f)
+        for m in months:
+            g1_hsn_by_month.setdefault(m, []).extend(hsn_all.get(m, []))
 
     # NEW: cross-source GSTIN -> name lookup (bug fix: a counterparty can have a genuinely blank
     # name in ONE source's own invoice rows -- confirmed against real data, e.g. a government TDS
@@ -2961,13 +3761,15 @@ def build_context(months, res, month_results, annual_data, ewb_out_rows, ewb_in_
 
     return dict(months=months, res=res, month_results=month_results, annual_data=annual_data,
                 ewb_out_rows=ewb_out_rows, ewb_in_rows=ewb_in_rows,
-                gstin_name_lookup=gstin_name_lookup,
+                gstin_name_lookup=gstin_name_lookup, g1_hsn_by_month=g1_hsn_by_month,
                 gstr9=gstr9, gstr9c=gstr9c, table8a=table8a, bs_pl_data=bs_pl_data,
                 self_gstin=self_gstin, fy_label=fy_label,
+                company_name=res.get("company_name", ""),
                 g1_by_month=g1_by_month, g3b_by_month=g3b_by_month,
                 g1_invcount_by_month=g1_invcount, g3b_extra_by_month=extra,
                 twob_by_month=twob, twob_summary_by_month=twob_summary,
                 b2c_by_month=b2c, g1_lines_fy=g1_lines_fy, twob_lines_fy=twob_lines_fy,
+                g1_cdnr_fy=g1_cdnr_fy,
                 blocked_credit_rows=blocked_credit_rows, blocked_credit_totals=blocked_credit_totals,
                 # NEW: GSTR-2A (r2a_data is None or dept.parse_r2a_excel()'s own return shape --
                 # every G-series builder below treats available=False as an explicit SKIP).

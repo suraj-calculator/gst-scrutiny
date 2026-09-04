@@ -622,18 +622,47 @@ def build_cancelled_einvoice_findings(cancelled_by_month, g1_named_invoice_numbe
                                  "No cancelled e-invoice number still appears in GSTR-1 B2B outward supply.", {}))
 
     # (b) cancelled e-invoice with a live outward EWB against the same invoice number
-    ewb_docnos = set()
+    # EXTENDED (per explicit request: "for a cancelled e-invoice that was EWB-eligible, is its
+    # EWB active or cancelled?"): checked the taxpayer's actual outward EWB export directly --
+    # confirmed it carries NO status/cancellation column at all (fields present: EWB No.,
+    # From/To GSTIN & Name, From/To Place, EWB No. & Dt., Doc No. & Dt., Assess Val., Tax Val.,
+    # HSN Code/Desc., Latest Vehicle No. -- this matches a known, already-documented structural
+    # limitation of this data source, not something this run's file happens to be missing).
+    # So the honest, complete answer this tool CAN give is: whether a matching EWB document
+    # exists at all for a cancelled invoice (a real, checkable fact) -- but NOT that EWB's own
+    # active/cancelled status, which the source simply does not carry. Every cancelled row is
+    # now annotated with one of three explicit states, never a guess.
+    ewb_by_docno = {}
     for e in (ewb_out_rows or []):
         if e.get("docno"):
-            ewb_docnos.add(str(e["docno"]).strip())
+            ewb_by_docno.setdefault(str(e["docno"]).strip(), []).append(e)
+    for c in all_cancelled:
+        matches = ewb_by_docno.get(str(c.get("invno", "")).strip(), [])
+        if matches:
+            ewbnos = ", ".join(str(m.get("ewbno", "")) for m in matches)
+            c["ewb_status_note"] = (
+                f"EWB FOUND (No. {ewbnos}) for this cancelled invoice -- its own active/cancelled "
+                f"status CANNOT be determined (this taxpayer's outward EWB export carries no "
+                f"status/cancellation column at all -- a structural gap in the source, not "
+                f"something this tool can compute). Verify directly on the e-way bill portal.")
+        elif ewb_out_rows:
+            c["ewb_status_note"] = "No EWB found for this invoice number in the outward EWB export."
+        else:
+            c["ewb_status_note"] = "Cannot check -- no outward EWB data supplied for this run."
+
+    ewb_docnos = set(ewb_by_docno)
     live_ewb_on_cancelled = [c for c in all_cancelled if c["invno"] in ewb_docnos]
     if live_ewb_on_cancelled:
         det = "; ".join(f"{c['invno']} ({c['month']})" for c in live_ewb_on_cancelled[:10])
-        findings.append(Finding("D2b", f"E-Invoice cancelled but outward EWB still exists: {len(live_ewb_on_cancelled)}",
+        findings.append(Finding("D2b", f"E-Invoice cancelled but a matching outward EWB document exists: {len(live_ewb_on_cancelled)}",
                                  FLAG, f"These invoice(s) have a CANCELLED e-invoice but a matching outward "
-                                 f"EWB document still exists against the same invoice number -- the goods-"
-                                 f"movement document survives a cancelled tax document, a genuine red flag "
-                                 f"(this was the project's own backlog item B9/D2, previously unbuilt). {det}.",
+                                 f"EWB DOCUMENT still exists against the same invoice number -- worth "
+                                 f"verifying (this was the project's own backlog item B9/D2, previously "
+                                 f"unbuilt). NOTE: this taxpayer's EWB export carries no status/cancellation "
+                                 f"column, so whether that EWB is itself still active or was separately "
+                                 f"cancelled cannot be determined from this data -- verify on the e-way bill "
+                                 f"portal directly; this finding only confirms the DOCUMENT exists, not its "
+                                 f"current status. {det}.",
                                  {"count": len(live_ewb_on_cancelled)}))
     else:
         sev = PASS if ewb_out_rows else INFO

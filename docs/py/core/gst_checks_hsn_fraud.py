@@ -632,7 +632,16 @@ def _hsn_rows_by_month(gstr1_path):
 
 def _cdnr_rows_by_month(gstr1_path):
     """{month: [dict(gstin, noteno, notedate, notetype, taxable, igst,cgst,sgst), ...]}
-    from the 'cdnr' sheet (credit/debit notes to registered recipients)."""
+    from the 'cdnr' sheet (credit/debit notes to registered recipients).
+    BUG FIX -- same root cause as the b2b sheet's continuation-row fix in parse_gstr1()
+    (gst_parsers_returns.py): the portal's own export leaves GSTIN/Note Number/Note Date
+    blank (merged cell) on every rate-line after a multi-rate note's first row. This used to
+    both (a) read gstin="" on those rows since it took each row's own blank cell literally,
+    AND (b) the `if not r or not r[0]: continue` guard actively SKIPPED them outright --
+    confirmed on real data, 488 of 1,636 cdnr rows across this taxpayer's FY (30%) are
+    continuation rows of this shape, previously dropped from checks #4/#11 entirely rather
+    than being attributed to their real note. Fixed the same way: forward-fill the last-seen
+    gstin/noteno/notedate/notetype within each month's block."""
     wb = openpyxl.load_workbook(gstr1_path, data_only=True)
     if "cdnr" not in wb.sheetnames:
         return {}
@@ -643,15 +652,28 @@ def _cdnr_rows_by_month(gstr1_path):
     out = {}
     for m, rws in blocks.items():
         lst = []
+        last_gstin = last_noteno = last_notedate = last_notetype = None
         for r in rws:
-            if not r or not r[0]:
+            if not r or not any(r):
                 continue
             g = lambda k: r[H[k]] if k in H and H[k] < len(r) else None
+            raw_gstin = g("GSTIN/UIN of Recipient")
+            raw_noteno = g("Note Number")
+            if raw_gstin not in (None, "") and raw_noteno not in (None, ""):
+                last_gstin = str(raw_gstin).strip()
+                last_noteno = str(raw_noteno).strip()
+                last_notedate = str(g("Note Date") or "").strip()
+                last_notetype = str(g("Note Type") or "").strip()
+                gstin_v, noteno_v, notedate_v, notetype_v = last_gstin, last_noteno, last_notedate, last_notetype
+            elif last_gstin is not None:
+                gstin_v, noteno_v, notedate_v, notetype_v = last_gstin, last_noteno, last_notedate, last_notetype
+            else:
+                gstin_v, noteno_v, notedate_v, notetype_v = "", "", "", ""
             lst.append(dict(
-                gstin=str(g("GSTIN/UIN of Recipient") or "").strip(),
-                noteno=str(g("Note Number") or "").strip(),
-                notedate=str(g("Note Date") or "").strip(),
-                notetype=str(g("Note Type") or "").strip(),
+                gstin=gstin_v,
+                noteno=noteno_v,
+                notedate=notedate_v,
+                notetype=notetype_v,
                 taxable=_num(g("Taxable Value")),
                 igst=_num(g("Integrated Tax")), cgst=_num(g("Central Tax")),
                 sgst=_num(g("State/UT Tax")),
@@ -661,6 +683,9 @@ def _cdnr_rows_by_month(gstr1_path):
 
 
 def _b2cl_rows_by_month(gstr1_path):
+    """BUG FIX -- same root cause as the b2b/cdnr fixes: multi-rate B2C-large invoices leave
+    Invoice Number/date/value/POS blank on continuation rows. Confirmed on real data (e.g. a
+    3-rate-line invoice under GSTIN-less B2CL rows 145-147). Forward-filled the same way."""
     wb = openpyxl.load_workbook(gstr1_path, data_only=True)
     if "b2cl" not in wb.sheetnames:
         return {}
@@ -671,14 +696,26 @@ def _b2cl_rows_by_month(gstr1_path):
     out = {}
     for m, rws in blocks.items():
         lst = []
+        last_invno = last_invdate = last_invval = last_pos = None
         for r in rws:
-            if not r or not r[0]:
+            if not r or not any(r):
                 continue
             g = lambda k: r[H[k]] if k in H and H[k] < len(r) else None
+            raw_invno = g("Invoice Number")
+            if raw_invno not in (None, ""):
+                last_invno = str(raw_invno).strip()
+                last_invdate = str(g("Invoice date") or "").strip()
+                last_invval = _num(g("Invoice Value"))
+                last_pos = str(g("Place Of Supply") or "").strip()
+                invno_v, invdate_v, invval_v, pos_v = last_invno, last_invdate, last_invval, last_pos
+            elif last_invno is not None:
+                invno_v, invdate_v, invval_v, pos_v = last_invno, last_invdate, last_invval, last_pos
+            else:
+                invno_v, invdate_v, invval_v, pos_v = "", "", 0.0, ""
             lst.append(dict(
-                invno=str(g("Invoice Number") or "").strip(),
-                invdate=str(g("Invoice date") or "").strip(),
-                invval=_num(g("Invoice Value")), pos=str(g("Place Of Supply") or "").strip(),
+                invno=invno_v,
+                invdate=invdate_v,
+                invval=invval_v, pos=pos_v,
                 rate=_num(g("Rate")), taxable=_num(g("Taxable Value")),
                 igst=_num(g("Integrated Tax")),
             ))

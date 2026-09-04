@@ -287,36 +287,58 @@ def sheet_name(prefix, month, limit=31):
 # CROSS-MONTH: rectification pairing
 # ======================================================================
 def build_rectification_pairs(month_results, month_g1_lines, months_covered):
-    """month_g1_lines: {month: {(invno,rate): [taxable, igst]}} from each month's own B2B.
+    """month_g1_lines: {month: {(invno,rate): [taxable, total_tax]}} from each month's own B2B.
     months_covered: the ACTUAL chronologically-sorted list of months this run
     covers (any number of FYs) -- replaces the old hardcoded MONTH_ORDER so
     multi-year runs still correctly find "the earlier month" across an FY
     boundary, not just within one hardcoded 12-month window.
     For every amendment row in ANY month, find which earlier month first
-    reported the 'original' invoice/note number, and pair them."""
+    reported the 'original' invoice/note number, and pair them.
+
+    UPDATED (per instruction): now also carries the ORIGINAL invoice's own taxable value and
+    total tax (from that earlier month's own B2B line, already available in month_g1_lines --
+    no new source needed) alongside the REVISED (amended) values already captured, plus the
+    DELTA between them -- previously this only showed revised values with no visible 'what
+    actually changed'. CGST/SGST breakdown of the ORIGINAL is not separately available (this
+    tool's GSTR-1 line index tracks taxable + total tax per rate-line, not a CGST/SGST split)
+    -- stated plainly on the sheet itself rather than guessing a 50/50 split, which would be
+    wrong for any interstate invoice."""
     pairs = []
     for res in month_results:
         amend_month = res["month"]
         for row in res["b2ba"]:
             orig_month = None
+            orig_taxable = orig_tax = None
             for m in months_covered:
                 if m == amend_month:
                     break
-                if m in month_g1_lines and any(k[0] == row["orig_invno"] for k in month_g1_lines[m]):
-                    orig_month = m
-                    break
+                if m in month_g1_lines:
+                    match = next((v for k, v in month_g1_lines[m].items() if k[0] == row["orig_invno"]), None)
+                    if match is not None:
+                        orig_month = m
+                        orig_taxable, orig_tax = match[0], match[1]
+                        break
+            revised_tax = (row.get("igst") or 0.0) + (row.get("cgst") or 0.0) + (row.get("sgst") or 0.0) + (row.get("cess") or 0.0)
             pairs.append(dict(
                 kind="B2B Invoice Amendment", gstin=row["gstin"], recipient=row["recipient"],
                 original_ref=row["orig_invno"], original_month=orig_month or "NOT FOUND in any earlier month provided",
                 revised_ref=row["revised_invno"], amended_in_month=amend_month,
                 taxable=row["taxable"], igst=row["igst"], cgst=row["cgst"], sgst=row["sgst"],
+                original_taxable=orig_taxable, original_tax=orig_tax,
+                revised_taxable=row["taxable"], revised_tax=revised_tax,
+                delta_taxable=(row["taxable"] - orig_taxable) if orig_taxable is not None else None,
+                delta_tax=(revised_tax - orig_tax) if orig_tax is not None else None,
             ))
         for row in res["cdnra"]:
+            revised_tax = (row.get("igst") or 0.0) + (row.get("cgst") or 0.0) + (row.get("sgst") or 0.0) + (row.get("cess") or 0.0)
             pairs.append(dict(
                 kind="Credit/Debit Note Amendment", gstin=row["gstin"], recipient="",
                 original_ref=row["orig_noteno"], original_month="(note amendments not month-matched -- see original_ref)",
                 revised_ref=row["revised_noteno"], amended_in_month=amend_month,
                 taxable=row["taxable"], igst=row["igst"], cgst=row["cgst"], sgst=row["sgst"],
+                original_taxable=None, original_tax=None,
+                revised_taxable=row["taxable"], revised_tax=revised_tax,
+                delta_taxable=None, delta_tax=None,
             ))
     return pairs
 
@@ -548,7 +570,7 @@ def write_ewb_pattern_annual(ws, month_results, hsn_findings):
     ws.auto_filter.ref = f"A4:I{max(r-1,4)}"
 
 
-def write_irn_late_annual(ws, hsn_findings):
+def write_irn_late_annual(ws, hsn_findings, einv_month_map=None, months_covered=None, ewb_out_rows=None):
     """NEW sheet: 'IRN Late-Generation -- Annual Detail'. Every #23 occurrence (35 in this
     dataset) as its own complete row -- never aggregated away."""
     ws.cell(1, 1, "IRN LATE-GENERATION -- ANNUAL DETAIL (check #23)").font = TITLEF
@@ -585,6 +607,142 @@ def write_irn_late_annual(ws, hsn_findings):
         ws.column_dimensions[col].width = w
     ws.freeze_panes = "A5"
     ws.auto_filter.ref = f"A4:I{max(r-1,4)}"
+
+    # ================================================================================
+    # NEW (per explicit request): "E-Way Bill vs IRN Timing Check + Missing Data Report" --
+    # two exception-only tables added below the existing #23 detail, same sheet. Scope is the
+    # FULL FY's e-invoiced/EWB'd population (not limited to the 35 already-"late" #23 rows
+    # above -- this is a different, independent check: whether the E-Way Bill for an invoice
+    # was generated BEFORE its IRN, not whether the IRN itself was late against the invoice
+    # date).
+    # ================================================================================
+    if einv_month_map is not None and months_covered is not None:
+        r += 2
+        ws.cell(r, 1, "TASK: E-WAY BILL vs IRN TIMING CHECK + MISSING DATA REPORT").font = TITLEF
+        r += 1
+        ws.cell(r, 1, "Per Rule 138A/48(4), the IRN should exist before an e-way bill is generated "
+                      "against the same invoice. Every invoice with BOTH a resolvable IRN date and "
+                      "a matching outward EWB is checked below; only the two exception cases are "
+                      "shown (rows where the EWB is safely after the IRN are not a finding and are "
+                      "excluded, per instruction).").font = Font(size=9, italic=True)
+        ws.cell(r, 1).alignment = Alignment(wrap_text=True); r += 2
+
+        # Build FY-wide invoice -> IRN date lookup (deduped -- IRN date is invoice-level, not
+        # rate-line-level; a multi-rate invoice's several rows all share the same IRN/IRN date).
+        irn_by_invno = {}
+        for m in months_covered:
+            p = einv_month_map.get(m)
+            if not p:
+                continue
+            for x in ana.read_einv_lines(p, m):
+                invno_key = str(x.get("invno", "")).strip().upper()
+                if invno_key and invno_key not in irn_by_invno:
+                    irn_by_invno[invno_key] = dict(invno=x.get("invno"), invdate=x.get("invdate"),
+                                                    irndate=x.get("irndate"))
+
+        # Build EWB doc-number -> ewbdate+ewbtime lookup (first occurrence per doc number wins;
+        # dedupe_ewb() has already dropped exact-duplicate rows upstream of ewb_out_rows).
+        ewb_by_docno = {}
+        for e in (ewb_out_rows or []):
+            docno_key = str(e.get("docno", "")).strip().upper()
+            if docno_key and docno_key not in ewb_by_docno:
+                ewb_by_docno[docno_key] = dict(ewbno=e.get("ewbno"), ewbdate=e.get("ewbdate"), ewbtime=e.get("ewbtime"))
+
+        all_invnos = set(irn_by_invno) | set(ewb_by_docno)
+        table1, table2 = [], []
+        for key in all_invnos:
+            irn_info = irn_by_invno.get(key)
+            ewb_info = ewb_by_docno.get(key)
+            irndate = irn_info.get("irndate") if irn_info else None
+            invdate = irn_info.get("invdate") if irn_info else None
+            invno_disp = irn_info.get("invno") if irn_info else (ewb_info.get("ewbno") and key)
+            ewbdate = ewb_info.get("ewbdate") if ewb_info else None
+            ewbtime = ewb_info.get("ewbtime") if ewb_info else None
+
+            if irndate is None or ewbdate is None:
+                missing = []
+                if irndate is None:
+                    missing.append("IRN Date Missing")
+                if ewbdate is None:
+                    missing.append("EWB Date Missing")
+                reason = "Both Missing" if len(missing) == 2 else missing[0]
+                ewb_dt_disp = "MISSING" if ewbdate is None else (
+                    f"{ewbdate} {ewbtime}" if ewbtime else str(ewbdate))
+                table2.append(dict(invno=invno_disp or key, invdate=invdate,
+                                    irndate=("MISSING" if irndate is None else str(irndate)),
+                                    ewbdate=ewb_dt_disp, reason=reason))
+                continue
+
+            # irndate is DATE-ONLY at the source (no time captured anywhere in the E-Invoice
+            # export -- confirmed on the raw file); ewbdate+ewbtime is a real date+time. Per
+            # instruction: since IRN's time-of-day is never known, an EWB on the SAME calendar
+            # date as the IRN is treated as ambiguous/cannot-rule-out and included here too,
+            # not assumed safe. Gap is shown in whole days (IRN date minus EWB date) -- 0 for
+            # the same-date/ambiguous case (never a fabricated sub-day figure built on an
+            # assumed IRN time this tool does not actually have), negative for a genuinely
+            # earlier EWB date.
+            gap_days = (irndate - ewbdate).days
+            if gap_days > 0:
+                # EWB strictly BEFORE the IRN's calendar date -- unambiguous risk.
+                table1.append(dict(invno=invno_disp or key, invdate=invdate, irndate=str(irndate),
+                                    ewbdate=f"{ewbdate} {ewbtime}" if ewbtime else str(ewbdate),
+                                    gap=-gap_days, same_date=False))
+            elif gap_days == 0:
+                # Same calendar date -- IRN's own time-of-day is unknown, so this cannot be
+                # confirmed as safe; included per instruction rather than assumed OK.
+                table1.append(dict(invno=invno_disp or key, invdate=invdate, irndate=str(irndate),
+                                    ewbdate=f"{ewbdate} {ewbtime}" if ewbtime else str(ewbdate),
+                                    gap=0, same_date=True))
+            # gap_days < 0 (EWB clearly on a later calendar date than the IRN) -- no risk,
+            # excluded from both tables per instruction ("only show exception cases").
+
+        # ---- Table 1: EWB Before IRN -- Risk Flag ----
+        ws.cell(r, 1, f"Table 1: EWB Before IRN — Risk Flag ({len(table1)})").font = Font(bold=True, size=11, color="1F3864")
+        r += 1
+        hdr1 = ["Invoice No.", "Invoice Date", "IRN Generation Date-Time", "E-Way Bill Generation Date-Time",
+                "Gap (IRN minus EWB, days)", "Risk Flag"]
+        for i, h in enumerate(hdr1, 1):
+            ws.cell(r, i, h)
+        _style_header(ws, r, len(hdr1))
+        r += 1
+        t1_hdr_row = r - 1
+        table1.sort(key=lambda x: x["gap"])   # most negative/severe first; same-date (0) rows last
+        if not table1:
+            ws.cell(r, 1, "None -- no invoice has an EWB generated before (or ambiguously on the "
+                          "same date as) its IRN.").font = Font(italic=True, color="808080")
+            r += 1
+        for x in table1:
+            risk_label = "EWB Before IRN" if not x["same_date"] else "EWB Before IRN (same calendar date -- IRN time-of-day unknown, cannot confirm sequence)"
+            vals = [x["invno"], x["invdate"], x["irndate"], x["ewbdate"], x["gap"], risk_label]
+            for ci, v in enumerate(vals, 1):
+                cell = ws.cell(r, ci, v)
+                cell.border = BORDER; cell.font = Font(size=10)
+                cell.alignment = Alignment(wrap_text=(ci == 6))
+            ws.cell(r, 5).fill = RED if x["gap"] < 0 else AMBER
+            r += 1
+        ws.column_dimensions["F"].width = 55
+        r += 2
+
+        # ---- Table 2: Missing Data -- Cannot Verify ----
+        ws.cell(r, 1, f"Table 2: Missing Data — Cannot Verify ({len(table2)})").font = Font(bold=True, size=11, color="1F3864")
+        r += 1
+        hdr2 = ["Invoice No.", "Invoice Date", "IRN Generation Date-Time", "E-Way Bill Generation Date-Time", "Reason"]
+        for i, h in enumerate(hdr2, 1):
+            ws.cell(r, i, h)
+        _style_header(ws, r, len(hdr2))
+        r += 1
+        table2.sort(key=lambda x: x["reason"])
+        if not table2:
+            ws.cell(r, 1, "None -- every invoice checked has both an IRN date and an EWB date to "
+                          "compare.").font = Font(italic=True, color="808080")
+            r += 1
+        for x in table2:
+            vals = [x["invno"], x["invdate"], x["irndate"], x["ewbdate"], x["reason"]]
+            for ci, v in enumerate(vals, 1):
+                cell = ws.cell(r, ci, v)
+                cell.border = BORDER; cell.font = Font(size=10)
+            ws.cell(r, 5).fill = AMBER
+            r += 1
 
 
 def write_itc_blocked_annual(ws, hsn_findings):
@@ -1330,42 +1488,275 @@ def style_header_local(ws, row, ncols):
 
 
 
-def write_rectification_sheet(ws, pairs, drc_payments):
-    ws.cell(1, 1, "CROSS-MONTH RECTIFICATION PAIRS").font = TITLEF
-    ws.cell(2, 1, "Every GSTR-1 amendment-sheet row (b2ba/cdnra) found in any supplied month, "
-                  "linked back to the month that first reported the original document -- "
-                  "so an error and its later correction both show up, together.").font = Font(size=9, italic=True)
-    hdr = ["Kind", "GSTIN", "Recipient", "Original Ref", "Reported In (original month)",
-           "Revised Ref", "Amended In (month)", "Taxable", "IGST", "CGST", "SGST"]
-    r = 4
-    for i, h in enumerate(hdr, 1):
-        ws.cell(r, i, h)
-    _style_header(ws, r, len(hdr))
+def write_cn_dn_impact_sheet(ws, data):
+    """NEW SHEET (per explicit instruction) -- 'CN-DN ITC Impact - Annual'. Complete
+    invoice-level detail of every credit/debit note this taxpayer both received (inward,
+    GSTR-2B B2B-CDNR) and issued (outward, GSTR-1 CDNR), each with a plain-language statement
+    of the resulting ITC/liability impact and exactly who it falls on -- see
+    gst_checks_flow.build_cn_dn_impact_data()'s own docstring for the direction-of-impact
+    reasoning this sheet is built from."""
+    company = data["company_name"]; gstin = data["self_gstin"]
+    ws.cell(1, 1, "CREDIT NOTE / DEBIT NOTE — ITC IMPACT (ANNUAL)").font = TITLEF
+    ws.cell(2, 1, f"GSTIN {gstin}  |  {company}").font = Font(size=9, italic=True)
+    ws.cell(3, 1, "Every credit/debit note this taxpayer received (inward, from its own "
+                  "suppliers) and issued (outward, to its own customers) this FY, with the "
+                  "resulting ITC/liability impact stated plainly against each one. Only the "
+                  "INWARD side is this taxpayer's own actionable ITC reversal/addition (ties "
+                  "to GSTR-3B 4(B)(2) on each month's Comparison sheet); the OUTWARD side's ITC "
+                  "consequence belongs to the counterparty -- documented here with exact "
+                  "GSTIN/name/amount for reference, since this tool has no visibility into "
+                  "whether the counterparty actually complied."
+                  ).font = Font(size=9, italic=True)
+    ws.cell(3, 1).alignment = Alignment(wrap_text=True, vertical="top")
+    ws.row_dimensions[3].height = 45
+
+    r = 5
+    ws.cell(r, 1, "QUICK SUMMARY").font = Font(bold=True, size=11, color="1F3864"); r += 1
+    _net = data["net_itc_reversal_required"]
+    # A negative net figure means inward Debit Notes this FY exceed inward Credit Notes -- i.e.
+    # the NET effect is additional ITC available, not a reversal. Both directions are stated
+    # plainly rather than always saying "must reverse" regardless of sign.
+    if _net >= 0:
+        _net_text = (f"Net ITC {company} must REVERSE this FY due to inward credit/debit notes "
+                    f"(inward CN tax Rs {data['inward_cn_tax']:,.2f} minus inward DN tax "
+                    f"Rs {data['inward_dn_tax']:,.2f}): Rs {_net:,.2f}")
+        _net_color = "9C0006" if _net > 0 else "006100"
+    else:
+        _net_text = (f"Inward Debit Notes this FY (Rs {data['inward_dn_tax']:,.2f} tax) EXCEED "
+                    f"inward Credit Notes (Rs {data['inward_cn_tax']:,.2f} tax) -- net effect is "
+                    f"ADDITIONAL ITC available to {company} of Rs {abs(_net):,.2f}, not a "
+                    f"reversal. Ensure this is reflected in the ITC claimed.")
+        _net_color = "006100"
+    ws.cell(r, 1, _net_text).font = Font(bold=True, size=10, color=_net_color)
     r += 1
-    pairs_start_r = r
-    if not pairs:
-        ws.cell(r, 1, "No amendment rows found in the month(s) supplied so far -- "
-                      "this sheet fills in automatically as more months are added.").font = Font(italic=True, color="808080")
+    ws.cell(r, 1, f"Total outward Credit Notes issued this FY: Rs {data['outward_cn_tax']:,.2f} tax "
+                  f"(informational -- recipients' ITC reversal obligation; {company}'s own "
+                  f"liability is already reduced in its own GSTR-1/3B).").font = Font(size=10)
+    r += 1
+    ws.cell(r, 1, f"Total outward Debit Notes issued this FY: Rs {data['outward_dn_tax']:,.2f} tax "
+                  f"(informational -- recipients' additional ITC eligibility; {company}'s own "
+                  f"liability is already increased in its own GSTR-1/3B).").font = Font(size=10)
+    r += 2
+
+    hdr = ["Month", "Counterparty GSTIN", "Counterparty Trade Name", "Note No.", "Note Date",
+           "Taxable Value", "IGST", "CGST", "SGST", "CESS", "Total Tax",
+           "ITC Availability (2B)", "Action / Impact"]
+    widths = [10, 18, 30, 18, 12, 16, 13, 13, 13, 11, 14, 16, 90]
+
+    def _write_table(title_text, rows, r, include_itc_col):
+        ws.cell(r, 1, title_text).font = Font(bold=True, size=11, color="1F3864"); r += 1
+        cols = hdr if include_itc_col else [h for h in hdr if h != "ITC Availability (2B)"]
+        for i, h in enumerate(cols, 1):
+            ws.cell(r, i, h)
+        _style_header(ws, r, len(cols))
         r += 1
-    for p in pairs:
-        vals = [p["kind"], p["gstin"], p["recipient"], p["original_ref"], p["original_month"],
-                p["revised_ref"], p["amended_in_month"], p["taxable"], p["igst"], p["cgst"], p["sgst"]]
+        hdr_row = r - 1
+        rows_sorted = sorted(rows, key=lambda x: -abs(x["tax_total"]))
+        if not rows_sorted:
+            ws.cell(r, 1, "None this FY.").font = Font(italic=True, color="808080")
+            r += 1
+        for idx, x in enumerate(rows_sorted):
+            vals = [x["month"], x["gstin"], x["name"], x["note"], x["date"],
+                    x["taxable"], x["igst"], x["cgst"], x["sgst"], x["cess"], x["tax_total"]]
+            if include_itc_col:
+                vals.append(x["itc_avail"])
+            vals.append(x["action"])
+            for ci, v in enumerate(vals, 1):
+                cell = ws.cell(r, ci, v)
+                cell.border = BORDER
+                cell.font = Font(size=10)
+                cell.alignment = Alignment(wrap_text=(ci == len(vals)), vertical="top")
+                if isinstance(v, float):
+                    cell.number_format = "#,##0.00"
+                if idx % 2 == 1:
+                    cell.fill = PatternFill("solid", fgColor="F2F2F2")
+            r += 1
+        total_tax = sum(x["tax_total"] for x in rows_sorted)
+        if rows_sorted:
+            ws.cell(r, 4, "TOTAL").font = Font(bold=True)
+            tc = ws.cell(r, 11, round(total_tax, 2)); tc.font = Font(bold=True); tc.number_format = "#,##0.00"
+            for c in range(1, len(cols) + 2):
+                ws.cell(r, c).border = BORDER
+            r += 1
+        ws.auto_filter.ref = None  # only one autofilter allowed per sheet; skip on multi-table sheets
+        return r + 1, hdr_row
+
+    inward_cn = [x for x in data["inward"] if x["is_credit"]]
+    inward_dn = [x for x in data["inward"] if not x["is_credit"]]
+    outward_cn = [x for x in data["outward"] if x["is_credit"]]
+    outward_dn = [x for x in data["outward"] if not x["is_credit"]]
+
+    r, _ = _write_table(f"Inward Credit Notes Received ({len(inward_cn)}) -- {company} must reverse ITC", inward_cn, r, True)
+    r, _ = _write_table(f"Inward Debit Notes Received ({len(inward_dn)}) -- {company} gains additional ITC", inward_dn, r, True)
+    r, _ = _write_table(f"Outward Credit Notes Issued ({len(outward_cn)}) -- recipient must reverse ITC", outward_cn, r, False)
+    r, _ = _write_table(f"Outward Debit Notes Issued ({len(outward_dn)}) -- recipient gains additional ITC", outward_dn, r, False)
+
+    for col, w in zip("ABCDEFGHIJKLM", widths):
+        ws.column_dimensions[col].width = w
+    ws.freeze_panes = "A5"
+
+
+def write_rectification_sheet(ws, pairs, drc_payments):
+    # REWORKED FOR READABILITY (bug report #5: "sheet feels very complex, make it easier to
+    # read, keep all the data intact"). Nothing below removes a single data point that was
+    # there before -- every pair, every column value, the FY summary, the further-analysis
+    # notes and the DRC payments block are all still present. What changed:
+    #   1. A "Quick Summary" block up top -- counts by kind, and the 8 biggest corrections by
+    #      tax impact -- so the reader sees what matters most before wading into the full table.
+    #   2. The single 16-column table (which mixed two different kinds of row, most of them
+    #      showing blank cells for columns that only apply to the OTHER kind) is now split into
+    #      two separately-headed tables: "B2B Invoice Amendments" (which has a matched original
+    #      to diff against) and "Credit/Debit Note Amendments" (which doesn't -- so it drops the
+    #      five always-blank Original/Delta columns instead of showing them empty on every row).
+    #      The CDNR section's static "(note amendments not month-matched...)" explanation, which
+    #      used to repeat on every single row, is now stated once in that section's own heading.
+    #   3. Each table is sorted by tax-impact (largest |delta| first) within its kind, so the
+    #      corrections most worth a look surface at the top rather than being buried among many
+    #      small ones in filing-chronology order -- the "Amended In" column still shows exactly
+    #      when each one happened, so no chronological information is lost, only the row order.
+    #   4. Banded row shading and a frozen header row, matching this tool's existing visual style
+    #      elsewhere, so a long table stays readable while scrolling.
+    ws.cell(1, 1, "CROSS-MONTH RECTIFICATION PAIRS -- GSTR-1 B2B AMENDMENTS (YEARLY)").font = TITLEF
+    ws.cell(2, 1, "Every GSTR-1 amendment-sheet row (b2ba/cdnra) found in any supplied month, "
+                  "linked back to the month that first reported the original document -- so an "
+                  "error and its later correction both show up, together. Split into two tables "
+                  "below by kind, each sorted by tax-impact (largest first); a Quick Summary up "
+                  "top surfaces the biggest corrections without needing to scan every row."
+                  ).font = Font(size=9, italic=True)
+    c2 = ws.cell(2, 1); c2.alignment = Alignment(wrap_text=True, vertical="top")
+
+    inv_pairs = [p for p in pairs if p["kind"] == "B2B Invoice Amendment"]
+    note_pairs = [p for p in pairs if p["kind"] == "Credit/Debit Note Amendment"]
+    n_not_found = sum(1 for p in inv_pairs if isinstance(p.get("original_month"), str) and "NOT FOUND" in p["original_month"])
+    n_matched = len(inv_pairs) - n_not_found
+    sum_delta_taxable = sum(p["delta_taxable"] for p in inv_pairs if p.get("delta_taxable") is not None)
+    sum_delta_tax = sum((p.get("delta_tax") or 0.0) for p in inv_pairs if p.get("delta_taxable") is not None)
+
+    r = 4
+    ws.cell(r, 1, "QUICK SUMMARY").font = Font(bold=True, size=11, color="1F3864")
+    r += 1
+    ws.cell(r, 1, f"B2B Invoice Amendments: {len(inv_pairs)} total -- {n_matched} matched to an "
+                  f"earlier month (net taxable-value change Rs {sum_delta_taxable:,.2f}, net tax "
+                  f"change Rs {sum_delta_tax:,.2f}), {n_not_found} where the original could not be "
+                  f"located (see amber rows below).").font = Font(size=10)
+    r += 1
+    ws.cell(r, 1, f"Credit/Debit Note Amendments: {len(note_pairs)} total (not month-matched to an "
+                  f"original -- see that table's own heading below for why).").font = Font(size=10)
+    r += 2
+
+    top8 = sorted((p for p in inv_pairs if p.get("delta_tax") is not None),
+                  key=lambda p: abs(p["delta_tax"]), reverse=True)[:8]
+    if top8:
+        ws.cell(r, 1, "Biggest corrections by tax impact (top 8, full detail in the table below)").font = Font(bold=True, size=10, color="1F3864")
+        r += 1
+        mini_hdr = ["GSTIN", "Original Ref", "Reported In", "Amended In", "Delta Taxable", "Delta Tax"]
+        for i, h in enumerate(mini_hdr, 1):
+            ws.cell(r, i, h)
+        _style_header(ws, r, len(mini_hdr))
+        r += 1
+        for p in top8:
+            vals = [p["gstin"], p["original_ref"], p["original_month"], p["amended_in_month"],
+                    p.get("delta_taxable"), p.get("delta_tax")]
+            for ci, v in enumerate(vals, 1):
+                cell = ws.cell(r, ci, v)
+                cell.border = BORDER
+                cell.font = Font(size=10)
+                if isinstance(v, float):
+                    cell.number_format = "#,##0.00"
+            if abs(p["delta_tax"]) >= 100000:
+                ws.cell(r, 6).fill = RED
+            elif abs(p["delta_tax"]) > 0.005:
+                ws.cell(r, 6).fill = AMBER
+            r += 1
+        r += 2
+
+    # ---- Table 1: B2B Invoice Amendments (has a matched-original diff) ----
+    ws.cell(r, 1, f"B2B Invoice Amendments -- Complete Detail ({len(inv_pairs)} row(s)), sorted by "
+                  f"tax impact").font = Font(bold=True, size=11, color="1F3864")
+    r += 1
+    hdr1 = ["GSTIN", "Recipient", "Original Ref", "Reported In (original month)",
+            "Revised Ref", "Amended In (month)", "Original Taxable", "Original Tax (Total)",
+            "Revised Taxable", "Revised Tax (Total)", "Delta Taxable (Revised - Original)",
+            "Delta Tax (Revised - Original)", "IGST (revised)", "CGST (revised)", "SGST (revised)"]
+    for i, h in enumerate(hdr1, 1):
+        ws.cell(r, i, h)
+    _style_header(ws, r, len(hdr1))
+    r += 1
+    table1_hdr_row = r - 1
+    inv_sorted = sorted(inv_pairs, key=lambda p: abs(p.get("delta_tax") or -1), reverse=True)
+    for idx, p in enumerate(inv_sorted):
+        vals = [p["gstin"], p["recipient"], p["original_ref"], p["original_month"],
+                p["revised_ref"], p["amended_in_month"], p.get("original_taxable"), p.get("original_tax"),
+                p.get("revised_taxable"), p.get("revised_tax"), p.get("delta_taxable"), p.get("delta_tax"),
+                p["igst"], p["cgst"], p["sgst"]]
         for ci, v in enumerate(vals, 1):
             cell = ws.cell(r, ci, v)
             cell.border = BORDER
             cell.font = Font(size=10)
             if isinstance(v, float):
                 cell.number_format = "#,##0.00"
-            if ci == 5 and isinstance(v, str) and "NOT FOUND" in v:
+            if idx % 2 == 1:
+                cell.fill = PatternFill("solid", fgColor="F2F2F2")
+            if ci == 4 and isinstance(v, str) and "NOT FOUND" in v:
                 cell.fill = AMBER
+            if ci in (11, 12) and isinstance(v, (int, float)) and abs(v) > 0.005:
+                cell.fill = RED if abs(v) >= 100000 else AMBER
         r += 1
-    ws.auto_filter.ref = f"A4:K{max(r-1, 4)}"
+    if inv_pairs:
+        ws.cell(r, 3, "TOTAL (amendments with a matched original only)").font = Font(bold=True)
+        v11 = ws.cell(r, 11, round(sum_delta_taxable, 2)); v11.font = Font(bold=True); v11.number_format = "#,##0.00"
+        v12 = ws.cell(r, 12, round(sum_delta_tax, 2)); v12.font = Font(bold=True); v12.number_format = "#,##0.00"
+        for c in range(1, len(hdr1) + 1):
+            ws.cell(r, c).border = BORDER
+        r += 1
+    else:
+        ws.cell(r, 1, "No invoice-amendment rows found in the month(s) supplied so far -- this "
+                      "table fills in automatically as more months are added.").font = Font(italic=True, color="808080")
+        r += 1
+    ws.auto_filter.ref = f"A{table1_hdr_row}:{get_column_letter(len(hdr1))}{max(r-1, table1_hdr_row)}"
+    r += 2
+
+    # ---- Table 2: Credit/Debit Note Amendments (no original-month match attempted -- see note) ----
+    ws.cell(r, 1, f"Credit/Debit Note Amendments -- Complete Detail ({len(note_pairs)} row(s)), "
+                  f"sorted by tax impact. These are not matched back to an original month: this "
+                  f"tool's own GSTR-1 credit-note sheet carries no original-invoice-number field, "
+                  f"so any CN-to-original link is an approximation by GSTIN+value at best -- left "
+                  f"unmatched here rather than guessed (see 'Original Ref' for the note number "
+                  f"itself).").font = Font(bold=True, size=11, color="1F3864")
+    ws.cell(r, 1).alignment = Alignment(wrap_text=True, vertical="top")
+    ws.row_dimensions[r].height = 30
     r += 1
-    n_not_found = sum(1 for p in pairs if isinstance(p.get("original_month"), str) and "NOT FOUND" in p["original_month"])
-    ws.cell(r, 1, f"Summary: {len(pairs)} amendment pair(s) linked this FY"
-                  + (f", {n_not_found} where the ORIGINAL document's month could not be located "
-                     f"(amber above) -- the original may be in a prior FY not supplied to this "
-                     f"run, or the amendment references a document this tool never saw." if n_not_found else ".")
+    hdr2b = ["GSTIN", "Original Ref (note no.)", "Revised Ref", "Amended In (month)",
+             "Revised Taxable", "Revised Tax (Total)", "IGST (revised)", "CGST (revised)", "SGST (revised)"]
+    for i, h in enumerate(hdr2b, 1):
+        ws.cell(r, i, h)
+    _style_header(ws, r, len(hdr2b))
+    r += 1
+    table2_hdr_row = r - 1
+    note_sorted = sorted(note_pairs, key=lambda p: abs(p.get("revised_tax") or 0), reverse=True)
+    for idx, p in enumerate(note_sorted):
+        vals = [p["gstin"], p["original_ref"], p["revised_ref"], p["amended_in_month"],
+                p.get("revised_taxable"), p.get("revised_tax"), p["igst"], p["cgst"], p["sgst"]]
+        for ci, v in enumerate(vals, 1):
+            cell = ws.cell(r, ci, v)
+            cell.border = BORDER
+            cell.font = Font(size=10)
+            if isinstance(v, float):
+                cell.number_format = "#,##0.00"
+            if idx % 2 == 1:
+                cell.fill = PatternFill("solid", fgColor="F2F2F2")
+        r += 1
+    if not note_pairs:
+        ws.cell(r, 1, "No note-amendment rows found in the month(s) supplied so far -- this table "
+                      "fills in automatically as more months are added.").font = Font(italic=True, color="808080")
+        r += 1
+    r += 1
+    ws.cell(r, 1, f"Summary: {len(pairs)} amendment pair(s) linked this FY ({len(inv_pairs)} invoice, "
+                  f"{len(note_pairs)} note); net taxable-value change across matched invoice "
+                  f"amendments: Rs {sum_delta_taxable:,.2f}, net tax change: Rs {sum_delta_tax:,.2f}"
+                  + (f". {n_not_found} invoice pair(s) where the ORIGINAL document's month could not "
+                     f"be located (amber above) -- the original may be in a prior FY not supplied to "
+                     f"this run, or the amendment references a document this tool never saw." if n_not_found else ".")
                   ).font = Font(bold=True, size=10, color="1F3864")
     r += 2
     ws.cell(r, 1, "SUGGESTED FURTHER ANALYSIS from raw data already in this tool's inputs, not yet "
@@ -1375,10 +1766,6 @@ def write_rectification_sheet(ws, pairs, drc_payments):
               "two month labels only) -- a same-quarter correction reads very differently from a "
               "correction filed just before the annual return deadline; the actual date fields "
               "this tool already parses per amendment row would support this without new input.",
-              "Net revenue/tax IMPACT of all amendments combined for the FY (sum of taxable/tax "
-              "delta across every pair here) -- currently each pair stands alone; a running FY "
-              "total of how much amendments moved outward turnover/tax up or down is a natural "
-              "one-line addition on top of the same rows already in this table.",
               "Cross-check against the 'GSTR-2A Amendments' sheet's own B2BA/CDNRA linkage -- that "
               "sheet does the equivalent match on the INWARD (purchase) side; a taxpayer amending "
               "heavily on the OUTWARD side while their suppliers rarely amend (or vice versa) is a "
@@ -1402,9 +1789,9 @@ def write_rectification_sheet(ws, pairs, drc_payments):
             cell.border = BORDER
             cell.font = Font(size=10)
         r += 1
-    for col, w in zip("ABCDEFGHIJK", [26, 14, 26, 22, 16, 14, 16, 12, 12, 12, 12]):
+    for col, w in zip("ABCDEFGHIJKLMNO", [18, 22, 18, 20, 18, 20, 15, 15, 15, 15, 15, 15, 13, 13, 13]):
         ws.column_dimensions[col].width = w
-    ws.freeze_panes = "A5"
+    ws.freeze_panes = "A3"
 
 
 def write_doc_series(ws, month_results):
@@ -1802,7 +2189,8 @@ def write_cancelled_einvoices(ws, all_cancelled, cross_check_findings, col_found
         ws.cell(r, 2, f.detail).alignment = Alignment(wrap_text=True)
         r += 1
     r += 1
-    hdr = ["Month", "Invoice No.", "Rate", "Taxable", "IGST", "IRN", "Cancel Date"]
+    hdr = ["Month", "Invoice No.", "Rate", "Taxable", "IGST", "CGST", "SGST", "IRN", "Cancel Date",
+           "E-Way Bill Status (for this invoice)"]
     cancel_hdr_row = r
     for i, h in enumerate(hdr, 1):
         ws.cell(r, i, h)
@@ -1812,18 +2200,119 @@ def write_cancelled_einvoices(ws, all_cancelled, cross_check_findings, col_found
         ws.cell(r, 1, "No cancelled e-invoices found (see note above for what this does/doesn't confirm).").font = Font(italic=True)
     for c in all_cancelled:
         vals = [c.get("month"), c.get("invno"), c.get("rate"), c.get("taxable"), c.get("igst"),
-                c.get("irn"), c.get("cancel_date")]
+                c.get("cgst"), c.get("sgst"), c.get("irn"), c.get("cancel_date"), c.get("ewb_status_note", "")]
         for ci, v in enumerate(vals, 1):
             cell = ws.cell(r, ci, v)
             cell.border = BORDER
             cell.font = Font(size=10)
             if isinstance(v, float):
                 cell.number_format = "#,##0.00"
+            if ci == 10 and isinstance(v, str) and "ACTIVE" in v.upper():
+                cell.fill = RED; cell.font = Font(bold=True, size=10, color="9C0006")
         r += 1
-    for col, w in zip("ABCDEFG", [9, 20, 8, 14, 14, 22, 14]):
+    for col, w in zip("ABCDEFGHIJ", [9, 20, 8, 14, 12, 12, 12, 22, 14, 46]):
         ws.column_dimensions[col].width = w
-    ws.auto_filter.ref = f"A{cancel_hdr_row}:G{max(r-1, cancel_hdr_row)}"
+    ws.auto_filter.ref = f"A{cancel_hdr_row}:J{max(r-1, cancel_hdr_row)}"
 
+
+
+def write_itc_detailed_recon_table(ws, rows):
+    """NEW TABLE (per explicit, detailed instruction) -- appended below the existing 'ITC
+    Annual Summary' sheet's own content (same sheet, not a duplicate). See
+    gst_checks_flow.build_itc_detailed_recon_data()'s own docstring for the full computation
+    and every deliberate design choice (Yes-only filter, strict composite-key mismatch
+    matching, inferred-not-parsed carry-forward, etc.)."""
+    HEADS = ("IGST", "CGST", "SGST", "CESS", "Total")
+    groups = [
+        ("ITC as per 2B (Available = Yes only)", "b2b", 5),
+        ("ITC as per 2A (all invoices)", "a2a", 5),
+        ("Mismatch (invoice-level, strict key)", None, 4),
+        ("Credit Note ITC Impact (reversal)", "cn", 5),
+        ("Debit Note ITC Impact (additional claim)", "dn", 5),
+        ("Net ITC Eligible (2B[Yes] + DN - CN)", "net", 5),
+        ("Actual ITC Claimed (GSTR-3B Table 4A)", "claimed", 5),
+        ("ITC Carried Fwd from Last FY (Inferred)", "cf", 5),
+        ("Excess / Short Claim (Claimed - Net Eligible)", "exs", 5),
+    ]
+    r0 = ws.max_row + 3
+    ws.cell(r0, 1, "ITC RECONCILIATION — TAX-HEAD-WISE, INVOICE-LEVEL (2A/2B/3B/CN-DN)").font = TITLEF
+    ws.cell(r0 + 1, 1, "2A and 2B are never netted together: 2B(Yes) is the sole ITC-eligibility "
+                       "baseline; 2A feeds ONLY the Mismatch columns (invoice-level, matched on "
+                       "invoice no. + supplier GSTIN + invoice value + all four tax heads + invoice "
+                       "date -- an invoice differing on any of these counts as unmatched, not a false "
+                       "match on number+GSTIN alone). Months with no GSTR-3B supplied show Actual "
+                       "Claimed / Excess-Short as blank, marked in Remarks, never a fabricated "
+                       "discrepancy.").font = Font(size=9, italic=True)
+    ws.cell(r0 + 1, 1).alignment = Alignment(wrap_text=True, vertical="top")
+    ws.row_dimensions[r0 + 1].height = 40
+    r = r0 + 3
+
+    # Two-row header: category (merged across its span) + tax-head sub-row.
+    c = 2
+    ws.cell(r, 1, "Month")
+    ws.merge_cells(start_row=r, start_column=1, end_row=r + 1, end_column=1)
+    for title, key, span in groups:
+        ws.cell(r, c, title)
+        ws.merge_cells(start_row=r, start_column=c, end_row=r, end_column=c + span - 1)
+        ws.cell(r, c).alignment = Alignment(horizontal="center", wrap_text=True)
+        if key is None:  # Mismatch group's own 4 sub-columns
+            for i, h in enumerate(["In 2A not 2B (Count)", "In 2A not 2B (Value)",
+                                    "In 2B not 2A (Count)", "In 2B not 2A (Value)"]):
+                ws.cell(r + 1, c + i, h)
+        else:
+            for i, h in enumerate(HEADS):
+                ws.cell(r + 1, c + i, h)
+        c += span
+    ws.cell(r, c, "Remarks")
+    ws.merge_cells(start_row=r, start_column=c, end_row=r + 1, end_column=c)
+    last_col = c
+    for row_ in ws[r:r + 1]:
+        for cell in row_:
+            cell.font = Font(bold=True, color="FFFFFF", size=10)
+            cell.fill = PatternFill("solid", fgColor="1F3864")
+            cell.border = BORDER
+    r += 2
+    data_start = r
+
+    for row_data in rows:
+        c = 1
+        is_fy_total = row_data.get("is_fy_total", False)
+        month_cell = ws.cell(r, c, row_data["month"])
+        if is_fy_total:
+            month_cell.font = Font(bold=True)
+        c += 1
+        for title, key, span in groups:
+            if key is None:
+                vals = [row_data["mism_a2a_not_b2b_ct"], row_data["mism_a2a_not_b2b_val"],
+                        row_data["mism_b2b_not_a2a_ct"], row_data["mism_b2b_not_a2a_val"]]
+            else:
+                head_vals = row_data[key]
+                total = round(sum(v for v in head_vals if v is not None), 2) if all(v is not None for v in head_vals) else None
+                vals = list(head_vals) + [total]
+            for v in vals:
+                cell = ws.cell(r, c, v)
+                cell.border = BORDER
+                cell.font = Font(bold=is_fy_total, size=10)
+                if isinstance(v, float):
+                    cell.number_format = "#,##0.00"
+                c += 1
+        rem_cell = ws.cell(r, c, row_data["remark"])
+        rem_cell.alignment = Alignment(wrap_text=True, vertical="top")
+        rem_cell.border = BORDER
+        rem_cell.font = Font(size=9, bold=is_fy_total)
+        # Conditional RED FILL: any row where Excess/Short TOTAL > 0.
+        exs = row_data.get("exs") or [None] * 4
+        exs_total = sum(v for v in exs if v is not None) if all(v is not None for v in exs) else None
+        if exs_total is not None and exs_total > 0:
+            for col in range(1, last_col + 1):
+                ws.cell(r, col).fill = RED
+        r += 1
+
+    for col_idx in range(1, last_col + 1):
+        letter = get_column_letter(col_idx)
+        ws.column_dimensions[letter].width = 12 if col_idx > 1 else 10
+    ws.column_dimensions[get_column_letter(last_col)].width = 55
+    ws.freeze_panes = ws.cell(data_start, 2).coordinate
 
 
 def write_hsn_review_table(ws, hsn_rows, month_label):
@@ -2163,7 +2652,13 @@ def main(folder="."):
     _2b_any = False
     for res_m in month_results:
         b2b = res_m["comp_raw"]["b2b"]
-        if b2b.get("available"):
+        # Uses '_summary_available' (the narrower 'was the ITC Available/control-total sheet
+        # itself readable' signal) -- these ITC_all_other_* fields come SPECIFICALLY from that
+        # sheet's own Table 3 breakdown and are all 0.0 (not missing, genuinely zero-filled) when
+        # that sheet isn't present, even though b2b/cdnr invoice-level data may be fully there.
+        # The broader 'available' flag would wrongly let a taxpayer with no 'ITC Available' sheet
+        # sum up a string of real zeros as if they were real data, understating gstr2b_fy_total.
+        if b2b.get("_summary_available"):
             _2b_any = True
             _2b_sums["igst"] += b2b.get("ITC_all_other_IGST", 0) or 0
             _2b_sums["cgst"] += b2b.get("ITC_all_other_CGST", 0) or 0
@@ -2311,6 +2806,23 @@ def main(folder="."):
 
     write_doc_series(wb.create_sheet("Doc-Series Integrity"), month_results)
     write_rectification_sheet(wb.create_sheet("Rectification Pairs"), rect_pairs, annual_data["bo"]["drc_payments"])
+    # NEW SHEET (per explicit instruction): 'CN-DN ITC Impact - Annual' -- see
+    # gst_checks_flow.build_cn_dn_impact_data()'s own docstring for what it computes and why.
+    # Needs flow_ctx (built above for the flow/counterparty layer); degrades to an explicit
+    # skipped sheet, never a crash, if that layer itself failed to build for this run.
+    ws_cndn = wb.create_sheet("CN-DN ITC Impact - Annual")
+    if flow_ctx is not None:
+        try:
+            write_cn_dn_impact_sheet(ws_cndn, flow.build_cn_dn_impact_data(flow_ctx))
+        except Exception as ex:
+            ws_cndn.cell(1, 1, "CREDIT NOTE / DEBIT NOTE — ITC IMPACT (ANNUAL)").font = TITLEF
+            ws_cndn.cell(3, 1, f"SKIPPED -- this sheet could not be built for this run: {ex!r}. "
+                               f"Every other sheet in this workbook is unaffected.").font = Font(italic=True, color="9C0006")
+    else:
+        ws_cndn.cell(1, 1, "CREDIT NOTE / DEBIT NOTE — ITC IMPACT (ANNUAL)").font = TITLEF
+        ws_cndn.cell(3, 1, "SKIPPED -- the flow/counterparty layer this sheet depends on did not "
+                           "build for this run (see the Master Dashboard for the reason). Every "
+                           "other sheet in this workbook is unaffected.").font = Font(italic=True, color="9C0006")
     write_hsn_fraud_checks(wb.create_sheet("HSN & Fraud Pattern Checks"), hsn_findings)
     write_filing_compliance(wb.create_sheet("Filing Compliance & Late Fee"), compliance_records)
     write_forensic_checks(wb.create_sheet("Forensic Checks (R13-R14)"), forensic_findings)
@@ -2320,7 +2832,9 @@ def main(folder="."):
     # ---- NEW: annual-detail sheets (this session's dedup/annual-detail prompt) -- additive
     # only, every existing per-month sheet above is completely unchanged. ----
     write_ewb_pattern_annual(wb.create_sheet("EWB Pattern - Annual"), month_results, hsn_findings)
-    write_irn_late_annual(wb.create_sheet("IRN Late-Gen - Annual"), hsn_findings)
+    write_irn_late_annual(wb.create_sheet("IRN Late-Gen - Annual"), hsn_findings,
+                          einv_month_map=res.get("einv_month_map"), months_covered=months_covered,
+                          ewb_out_rows=ewb_out_rows)
     write_itc_blocked_annual(wb.create_sheet("ITC-Blocked Inv - Annual"), hsn_findings)
     write_round_number_annual(wb.create_sheet("Round-Number Inv - Annual"), hsn_findings)
     write_hsn_timeline_annual(wb.create_sheet("HSN Timeline - Annual"), hsn_findings)
@@ -2332,6 +2846,19 @@ def main(folder="."):
     annualwb.write_related_party(wb.create_sheet("Related-Party Alerts"), annual_data)
     annualwb.write_top_counterparties(wb.create_sheet("Top Counterparties"), annual_data)
     flow.write_all(wb, flow_sheets)
+    # NEW TABLE (per explicit instruction): appended below the existing 'ITC Annual Summary'
+    # sheet's own content, same sheet -- see write_itc_detailed_recon_table()'s own docstring.
+    # Guarded on the sheet actually existing: if the flow/counterparty layer failed entirely
+    # above, flow_sheets is [] and 'ITC Annual Summary' was never created at all this run.
+    if "ITC Annual Summary" in wb.sheetnames:
+        try:
+            write_itc_detailed_recon_table(wb["ITC Annual Summary"], flow.build_itc_detailed_recon_data(flow_ctx))
+        except Exception as ex:
+            ws_itcrecon = wb["ITC Annual Summary"]
+            r_err = ws_itcrecon.max_row + 3
+            ws_itcrecon.cell(r_err, 1, f"SKIPPED -- the tax-head-wise ITC reconciliation table below "
+                             f"could not be built for this run: {ex!r}. The sheet's existing content "
+                             f"above is unaffected.").font = Font(italic=True, color="9C0006")
 
     # ---- NEW: Potential Blocked Credits (additive -- new module, new sheet only; does not
     # touch any calculation, merge, or sheet above). Reuses the SAME invoice-level GSTR-2B rows
@@ -2400,7 +2927,25 @@ def main(folder="."):
     # future change) and there's a single place to look if this behaviour ever needs revisiting.
     for _ws in wb.worksheets:
         _ws.freeze_panes = None
+    # NUMBERS-STORED-AS-TEXT FIX (per explicit request): one guaranteed-complete pass over the
+    # in-memory workbook, converting every text cell that's provably a lossless integer to a
+    # real number -- see gst_core.convert_numeric_text_to_numbers's own docstring for exactly
+    # what is and isn't touched and why. Must run before save (it changes cell values, unlike
+    # fix_ooxml_conformance below, which only touches the saved file's raw ZIP structure).
+    _num_converted, _num_skipped = mpu.convert_numeric_text_to_numbers(wb)
     wb.save(outfile)
+    # BUG FIX (real, confirmed, not theoretical -- reported against actual Excel by the user,
+    # verified by byte-level diff against their own Excel-repaired copy, and independently
+    # reproduced on a minimal single-cell workbook): openpyxl 3.1.5 in this environment omits
+    # the XML declaration on every part and doesn't order the ZIP per the OOXML spec, both of
+    # which are exactly what Excel's own strict parser objects to. See
+    # gst_core.fix_ooxml_conformance's own docstring for the full diagnosis. This is a pure
+    # post-save fix-up -- no cell content, style, or sheet data is touched, only the raw ZIP
+    # structure of the file already written above.
+    mpu.fix_ooxml_conformance(outfile)
+    print(f"  Numbers-stored-as-text fix: {_num_converted} cell(s) converted to real numbers, "
+          f"{_num_skipped} left as text (would have lost a leading zero or similar -- e.g. an "
+          f"HSN code like '09' or '035').")
     print(f"\nSaved: {outfile}")
     print(f"Months covered: {months_covered}")
     print(f"Gaps within span: {months_gap}")

@@ -131,29 +131,52 @@ def _parse_date(v):
 def read_gstr1_lines(path, month):
     """Detailed B2B + CDNR rows for line-level scrutiny, scoped to ONE month
     out of the merged GSTR-1 workbook.
-    Returns list of dicts with the fields the analysis checks need."""
+    Returns list of dicts with the fields the analysis checks need.
+    BUG FIX -- same root cause as parse_gstr1()'s b2b continuation-row fix in
+    gst_parsers_returns.py, found while tracing a reported false gap through to every
+    consumer of GSTR-1 invoice-level data: the portal's own export leaves GSTIN/Invoice
+    (or Note) Number/Date blank -- a merged cell -- on every rate-line after a multi-rate
+    document's first row. This function used to read each row's own (blank) cells in
+    isolation, so a continuation row's real invoice/note identity was lost for every check
+    that consumes this function's output (~15 checks across gst_checks_hsn_fraud.py,
+    gst_report.py and master_build.py). Fixed the same way: forward-fill the last-seen
+    gstin/invno/invdate/pos/rcm within each month's block, reset per sheet (a cdnr
+    continuation row must never inherit identity left over from the b2b sheet)."""
     wb = _open(path)
     out = []
     for sn, kind in (("b2b, sez, de_inv", "INV"), ("cdnr", "CN"), ("cdnur", "CN")):
         rows, H = _sheet_rows(wb, sn)
         if not rows:
             continue
+        last = None  # (gstin, invno, invdate_raw, pos, rcm) from the last primary row
         for r in mpu.rows_for_month(rows, 3, month):
             if not any(r):
                 continue
+            raw_gstin = _g(r, H, "GSTIN/UIN of Recipient", "GSTIN/UIN", "Recipient GSTIN")
+            raw_invno = _g(r, H, "Invoice Number", "Note Number", "Invoice/Advance Receipt Number")
+            if raw_gstin not in (None, "") and raw_invno not in (None, ""):
+                last = (raw_gstin, raw_invno,
+                        _g(r, H, "Invoice date", "Invoice Date", "Note date", "Note Date"),
+                        _g(r, H, "Place Of Supply", "Place of Supply"),
+                        _g(r, H, "Reverse Charge", "Reverse charge"))
+                gstin_v, invno_v, invdate_v, pos_v, rcm_v = last
+            elif last is not None:
+                gstin_v, invno_v, invdate_v, pos_v, rcm_v = last
+            else:
+                gstin_v, invno_v, invdate_v, pos_v, rcm_v = "", "", None, "", ""
             out.append(dict(
                 sheet=sn, kind=kind,
-                gstin=str(_g(r, H, "GSTIN/UIN of Recipient", "GSTIN/UIN", "Recipient GSTIN") or "").strip(),
-                invno=str(_g(r, H, "Invoice Number", "Note Number", "Invoice/Advance Receipt Number") or "").strip(),
-                invdate=_parse_date(_g(r, H, "Invoice date", "Invoice Date", "Note date", "Note Date")),
-                pos=str(_g(r, H, "Place Of Supply", "Place of Supply") or "").strip(),
+                gstin=str(gstin_v or "").strip(),
+                invno=str(invno_v or "").strip(),
+                invdate=_parse_date(invdate_v),
+                pos=str(pos_v or "").strip(),
                 rate=num(_g(r, H, "Rate", "Rate (%)")),
                 taxable=num(_g(r, H, "Taxable Value")),
                 igst=num(_g(r, H, "Integrated Tax")),
                 cgst=num(_g(r, H, "Central Tax")),
                 sgst=num(_g(r, H, "State/UT Tax")),
                 cess=num(_g(r, H, "Cess Amount")),
-                rcm=str(_g(r, H, "Reverse Charge", "Reverse charge") or "").strip(),
+                rcm=str(rcm_v or "").strip(),
                 irn=str(_g(r, H, "IRN") or "").strip(),
                 irndate=_parse_date(_g(r, H, "IRN date", "IRN Date", "Ack Date", "Acknowledgement Date")),
             ))
@@ -880,19 +903,34 @@ def parse_ewb(path):
 # ----------------------------------------------------------------------
 def read_gstr1_invoices(path, month):
     """invno -> dict(taxable, igst, cgst, sgst, pos, gstin, rate_lines, consignment).
-    Scoped to ONE month's block out of the merged GSTR-1 workbook."""
+    Scoped to ONE month's block out of the merged GSTR-1 workbook.
+    BUG FIX -- same root cause as read_gstr1_lines() above and parse_gstr1() in
+    gst_parsers_returns.py: continuation rows of a multi-rate invoice carry a blank
+    Invoice Number cell (merged in the source export), so they used to fall into their own
+    d[""] bucket instead of accumulating into their real parent invoice's totals -- silently
+    losing that portion of the invoice's taxable/tax value from this function's output.
+    Fixed the same way: forward-fill the last-seen invoice identity within this month."""
     wb = openpyxl.load_workbook(path, data_only=True)
     ws = wb["b2b, sez, de_inv"]; rows = list(ws.iter_rows(values_only=True))
     H = {h: i for i, h in enumerate([str(c).strip() if c else "" for c in rows[3]])}
     def g(r, k): return r[H[k]] if k in H and H[k] < len(r) else None
     inv = {}
+    last_no, last_pos, last_gstin = None, "", ""
     for r in mpu.rows_for_month(rows, 3, month):
         if not any(r):
             continue
-        no = str(g(r, "Invoice Number") or "").strip()
+        raw_no = g(r, "Invoice Number")
+        raw_gstin = g(r, "GSTIN/UIN of Recipient")
+        if raw_no not in (None, "") and raw_gstin not in (None, ""):
+            last_no = str(raw_no).strip()
+            last_pos = str(g(r, "Place Of Supply") or "").strip()
+            last_gstin = str(raw_gstin).strip()
+        no = last_no if last_no is not None else str(raw_no or "").strip()
+        pos_v = last_pos if last_no is not None else str(g(r, "Place Of Supply") or "").strip()
+        gstin_v = last_gstin if last_no is not None else str(raw_gstin or "").strip()
         d = inv.setdefault(no, dict(taxable=0.0, igst=0.0, cgst=0.0, sgst=0.0,
-                                    invval=0.0, pos=str(g(r, "Place Of Supply") or "").strip(),
-                                    gstin=str(g(r, "GSTIN/UIN of Recipient") or "").strip(),
+                                    invval=0.0, pos=pos_v,
+                                    gstin=gstin_v,
                                     rates=set()))
         d["taxable"] += num(g(r, "Taxable Value"))
         d["igst"] += num(g(r, "Integrated Tax"))
@@ -1305,8 +1343,13 @@ def run(ewb_out, ewb_in, g1inv, einv, g3b, b2b, ewb_out_file_supplied=True, ewb_
     # ===== D. EWB-In vs GSTR-2B =====
     ewb_in_assess = sum(e["assess"] for e in ewb_in)
     ewb_in_tax = sum(e["taxval"] for e in ewb_in)
+    # b2b_itc specifically needs '_summary_available' (the narrower 'ITC Available sheet itself
+    # was readable' signal) -- ITC_all_other_* are SUMMARY-SHEET fields, genuinely 0.0 (not
+    # missing) when that sheet isn't present, even on a taxpayer whose full B2B/CDNR
+    # invoice-level data parsed perfectly. twob_lines below correctly keeps using the broader
+    # 'available' flag, since _lines holds that same invoice-level data, unaffected either way.
     b2b_itc = ((b2b["ITC_all_other_IGST"] + b2b["ITC_all_other_CGST"] + b2b["ITC_all_other_SGST"])
-               if b2b_available else None)
+               if b2b.get("_summary_available") else None)
     twob_lines = b2b.get("_lines") if b2b_available else None   # set when 2B came from Excel
 
     if not ewb_in_file_supplied:

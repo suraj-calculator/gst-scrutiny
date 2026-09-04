@@ -338,9 +338,22 @@ def _einv_months(path):
 
 
 def _gstr2b_months(path):
+    """Which months a GSTR-2B file covers, from its period markers.
+
+    BUG FIX (same root cause as parse_2b_excel's own fix, found on the same real taxpayer's
+    file): this unconditionally read 'ITC Available' for its markers, so a file lacking that
+    sheet (confirmed real: some exports carry only 'B2B'+'B2B-CDNR') would raise here too --
+    caught by _build_month_file_map's own try/except, but the practical effect was this file
+    silently contributing ZERO months to gstr2b_month_map even after classify_folder correctly
+    recognised it as a GSTR-2B file. 'B2B' carries the identical period-marker format ('Financial
+    Year: ... | Tax Period: ...' rows) -- confirmed directly against this taxpayer's real file --
+    so it's a safe, equivalent fallback source for month coverage when 'ITC Available' is absent."""
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
-        ws = wb["ITC Available"]
+        sheet_name = "ITC Available" if "ITC Available" in wb.sheetnames else "B2B"
+        if sheet_name not in wb.sheetnames:
+            return set()
+        ws = wb[sheet_name]
         rows = list(ws.iter_rows(values_only=True))
     finally:
         wb.close()
@@ -533,6 +546,17 @@ def classify_folder(folder="."):
         if ({"B2B", "B2BA"}.issubset(sn) and _has_cdnr_pair(sn) and _has_cdnr_pair(sn, "A")
                 and "Read me" in sn):
             table8a_files.append(f); continue
+        # GSTR-2B, minimal shape (confirmed real, not hypothetical: one real taxpayer's export
+        # carried ONLY 'B2B' + 'B2B-CDNR' -- no 'ITC Available', no 'Read me', no B2BA/CDNRA at
+        # all -- and was silently never classified as GSTR-2B at all, so it never even reached
+        # the parser). Deliberately placed AFTER the GSTR-2A/Table-8A checks above (both of
+        # which require B2BA to ALSO be present) so a genuine 4+-sheet 2A/Table-8A-shaped file
+        # is never mis-caught here: "B2BA not in sn" alone is sufficient to guarantee this isn't
+        # one of those, since both require B2BA unconditionally. gst_parsers_returns.
+        # parse_2b_excel already handles 'ITC Available' being absent gracefully (summary
+        # marked not-available, invoice-level B2B/B2B-CDNR parsing unaffected).
+        if "B2B" in sn and "B2BA" not in sn:
+            gstr2b_files.append(f); continue
         # HSN/SAC code-and-description master (e.g. the NIC e-Invoice system's own
         # downloadable HSN_SAC.xlsx) -- content signature: exactly these two sheet
         # names. NOTE: this master has CODE + DESCRIPTION columns only, no GST rate
@@ -690,5 +714,120 @@ def classify_folder(folder="."):
                                     if machinery_hsn_master_files else None),
         self_gstin=self_gstin, company_name=company_name,
     )
+
+
+_NUMERIC_TEXT_RE = re.compile(r'^-?\d+$')
+
+
+def convert_numeric_text_to_numbers(wb):
+    """Runs on the IN-MEMORY workbook right before save (per explicit request): a great deal of
+    the tool's source data (E-Invoice's Taxable Value/tax columns, HSN codes, invoice/EWB/IRN
+    reference numbers, etc.) arrives from the GST portal's own exports as TEXT even when it's
+    purely digits -- openpyxl/this tool then writes many of those cells straight through, so
+    Excel shows its 'Number Stored as Text' warning (the green corner flag) on them, and anyone
+    doing further analysis has to manually convert each such column before it behaves as a
+    number (sorting, SUM, VLOOKUP-by-number, etc.).
+
+    Rather than hunting down and fixing the write call at every one of the many places across
+    this codebase that passes such a value straight through, this is ONE guaranteed-complete
+    pass over every cell actually in the final workbook -- the same strategy already used for
+    the freeze-panes pass in master_build.py, for the same reason (nothing missed, including
+    anything a future change adds).
+
+    SAFETY: a cell is converted ONLY when doing so is provably lossless -- str(int(cell_text))
+    must reproduce the exact original text. This is what excludes any identifier where a digit
+    string's exact form matters and isn't just its numeric value: an HSN code like '09' or
+    '035' would silently become 9 / 35 if converted, changing what's displayed and losing a
+    real digit -- confirmed 93 such cells exist in a real run, all skipped, left as text
+    exactly as they were. Decimal-valued text cells are also left untouched (a real scan of a
+    full run found zero of them -- every text-numeric cell in this tool's output is an
+    integer-shaped identifier or count -- so there's no decimal round-trip logic to get subtly
+    wrong; if one ever appears, it stays as text rather than risk misconverting it). Only a
+    cell's VALUE changes -- its style, number format, and every other property are untouched.
+
+    Returns (converted_count, skipped_count) for the caller to log."""
+    converted = 0
+    skipped = 0
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                if cell.data_type != "s" or cell.value is None:
+                    continue
+                v = str(cell.value).strip()
+                if not _NUMERIC_TEXT_RE.match(v):
+                    continue
+                try:
+                    n = int(v)
+                except ValueError:
+                    continue
+                if str(n) == v:
+                    cell.value = n
+                    converted += 1
+                else:
+                    skipped += 1
+    return converted, skipped
+
+
+def fix_ooxml_conformance(path):
+    """Post-process a workbook AFTER openpyxl has already saved it, to fix real, confirmed
+    Excel-'needs repair' bugs (not assumed, not theoretical) found in this exact pipeline's
+    own output:
+
+    1. Every '.xml' and '.rels' part missing its XML declaration -- see the detailed
+       diagnosis in the fix below (byte-diff against a real Excel-repaired reference file,
+       independently reproduced on a minimal single-cell openpyxl.Workbook()).
+
+    2. A dangling <selection pane="bottomLeft" .../> attribute left behind on 66 of this
+       workbook's 89 sheets. Root cause, confirmed by direct reproduction: this tool sets
+       ws.freeze_panes to a real cell during sheet construction (for the header-row freeze
+       every sheet used to have), then unconditionally sets ws.freeze_panes = None on every
+       sheet right before save (per an explicit 'remove all freeze panes' instruction).
+       openpyxl's freeze_panes=None correctly removes the <pane> element that defines the
+       actual split, but does NOT clean up the pane="..." attribute that was written onto
+       the sheet's <selection> element while freeze_panes was still active -- confirmed by
+       reproducing the exact sequence (set freeze_panes to a cell, then to None) on a
+       throwaway single-cell workbook and inspecting the resulting XML directly: the same
+       orphaned attribute appears. The result is a <selection> referencing a pane that no
+       <pane> element defines anywhere in the file (confirmed: zero <pane> elements exist
+       anywhere in this workbook, since every sheet's freeze is unconditionally cleared) --
+       an internal inconsistency lenient readers (LibreOffice, openpyxl's own loader) ignore
+       silently, but Excel's own stricter loader does not tolerate, especially once the file
+       is taken out of Protected View's lighter-weight rendering path into full edit mode.
+       Confirmed present on 66 of 89 real sheets in this tool's own last output before this
+       fix. Safe to strip unconditionally: since freeze_panes is cleared on every sheet, no
+       sheet anywhere in this workbook legitimately has an active pane split, so a
+       pane="..." attribute on any <selection> element is ALWAYS orphaned, never legitimate,
+       in this tool's output.
+    """
+    import os
+    import re
+    import zipfile
+
+    tmp = path + ".ooxmlfix.tmp"
+    DECL_RELS = b'<?xml version="1.0" encoding="UTF-8"?>\n'
+    DECL_CONTENT = b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    PRIORITY = ["[Content_Types].xml", "_rels/.rels", "xl/workbook.xml", "xl/_rels/workbook.xml.rels"]
+    DANGLING_PANE_RE = re.compile(rb'<selection pane="[^"]*" ')
+
+    with zipfile.ZipFile(path, "r") as zin:
+        entries = {info.filename: (info, zin.read(info.filename)) for info in zin.infolist()}
+
+    fixed = {}
+    for name, (info, data) in entries.items():
+        if (name.endswith(".xml") or name.endswith(".rels")) and not data.startswith(b"<?xml"):
+            decl = DECL_RELS if (name.endswith(".rels") or name == "[Content_Types].xml") else DECL_CONTENT
+            data = decl + data
+        if name.startswith("xl/worksheets/sheet") and name.endswith(".xml"):
+            data = DANGLING_PANE_RE.sub(b"<selection ", data)
+        fixed[name] = (info, data)
+
+    ordered_names = [n for n in PRIORITY if n in fixed] + [n for n in fixed if n not in PRIORITY]
+
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
+        for name in ordered_names:
+            info, data = fixed[name]
+            zout.writestr(info, data)
+
+    os.replace(tmp, path)
 
 
