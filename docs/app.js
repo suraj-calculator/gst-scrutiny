@@ -193,9 +193,19 @@ function initRuntime() {
 // Every call gets an explicit timeout — with the worker now processing one
 // call at a time (see worker.js's queue), a truly hung call would otherwise
 // show "Processing…" forever with zero feedback. Individual sections
-// normally finish in well under a minute; full_scrutiny genuinely can take
-// a couple of minutes (measured ~117s natively for a full year), so it
-// gets much more room before being treated as failed.
+// normally finish in well under a minute.
+//
+// full_scrutiny's budget was originally 10 min, based on an early ~117s
+// native-CPython measurement from BEFORE GSTR-2A and the Annual Reports
+// (BO Profile/GSTR-9/9C) paths were wired in. With those enabled on a real
+// full 12-month run, native CPython alone measured 312s (~5.2 min) for a
+// smaller taxpayer and ~23 min for a larger one -- and this genuinely
+// legitimate, non-hung processing was hitting the old 10-minute timeout
+// in-browser (WASM has no JIT and is measurably slower than native CPython
+// on top of that), producing a false "genuinely stuck" error on a run that
+// was simply still working. Raised well above the slowest real run
+// observed so far, so an actual hang is still eventually caught without
+// false-failing correct-but-slow runs.
 //
 // The timeout clock starts when the worker actually begins running this
 // call (the "started" message), NOT when it's queued — a call queued
@@ -205,7 +215,7 @@ function initRuntime() {
 // queued together each timed out because the clock had already been
 // running since they were queued, not since they actually started.)
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
-const FULL_SCRUTINY_TIMEOUT_MS = 10 * 60 * 1000;
+const FULL_SCRUTINY_TIMEOUT_MS = 45 * 60 * 1000;
 
 function callWorker(adapter, args, opts) {
   opts = opts || {};
@@ -878,13 +888,17 @@ document.getElementById("run-btn").addEventListener("click", async function () {
   let tickHandle = null;
   const onStarted = () => {
     const t0 = performance.now();
-    // A full year's worth of checks genuinely takes a couple of minutes even
-    // natively (measured: ~2 min for 12 months under plain CPython) — WASM
-    // is slower still. Show elapsed time rather than a plain spinner, so a
-    // long wait reads as "working" instead of "frozen."
+    // A full year's worth of checks, with GSTR-2A + Annual Reports (BO
+    // Profile/GSTR-9/9C) also supplied, has measured 5-25+ minutes under
+    // plain native CPython depending on data volume -- WASM (no JIT) is
+    // slower still. Show elapsed time rather than a plain spinner, so a
+    // long wait reads as "working" instead of "frozen," and set an honest
+    // expectation instead of the old "1-3 minutes" estimate (measured before
+    // GSTR-2A/Annual Reports existed, on a smaller check set -- it was
+    // actively causing real, correctly-running scrutiny to look stuck).
     tickHandle = setInterval(() => {
       const secs = Math.round((performance.now() - t0) / 1000);
-      this.innerHTML = `${ICONS.upload} Running full scrutiny… (${secs}s — a full year typically takes 1-3 minutes, please keep this tab open)`;
+      this.innerHTML = `${ICONS.upload} Running full scrutiny… (${secs}s — a full year with every optional source can take 10-20+ minutes in-browser, please keep this tab open)`;
     }, 1000);
     this.innerHTML = `${ICONS.upload} Running full scrutiny…`;
   };
