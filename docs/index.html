@@ -139,6 +139,36 @@
   .boot-sub.error { color: var(--flag-fg); }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
 
+  /* ---------- scrutiny-run overlay (per explicit request: make the
+     "running / don't close this tab" state impossible to miss, since it's
+     currently just small text inside the run button) ---------- */
+  .scrutiny-overlay {
+    position: fixed; inset: 0; z-index: 110;
+    display: flex; align-items: center; justify-content: center;
+    background: color-mix(in srgb, var(--bg) 82%, transparent);
+    backdrop-filter: blur(3px);
+  }
+  .scrutiny-overlay[hidden] { display: none; }
+  .scrutiny-card {
+    display: flex; flex-direction: column; align-items: center; gap: 14px;
+    padding: 40px 44px;
+    background: var(--surface);
+    border: 2px solid var(--review-border);
+    border-radius: 16px;
+    box-shadow: var(--shadow-pop);
+    max-width: 480px;
+    text-align: center;
+  }
+  .scrutiny-title { font-family: 'Archivo', sans-serif; font-size: 19px; font-weight: 800; color: var(--ink); margin: 4px 0 0; }
+  .scrutiny-timer { font-family: 'IBM Plex Mono', monospace; font-size: 28px; font-weight: 600; color: var(--accent-ink); margin: 0; }
+  .scrutiny-warning {
+    display: flex; align-items: flex-start; gap: 10px; text-align: left;
+    background: var(--review-bg); border: 1px solid var(--review-border); color: var(--review-fg);
+    border-radius: var(--radius-sm); padding: 12px 14px; font-size: 13.5px; font-weight: 600; line-height: 1.5;
+  }
+  .scrutiny-warning svg { width: 18px; height: 18px; flex: none; margin-top: 1px; }
+  .scrutiny-note { font-size: 12px; color: var(--ink-faint); margin: 0; line-height: 1.5; }
+
   .intro { grid-column: 2; padding-top: 28px; max-width: 62ch; }
   .intro p { color: var(--ink-muted); margin: 6px 0 0; font-size: 14.5px; }
   .intro-tag { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent-ink); background: var(--accent-tint); padding: 4px 9px; border-radius: 100px; }
@@ -325,6 +355,19 @@
     <p class="boot-eyebrow">Did you know?</p>
     <p class="boot-message" id="boot-message">GST launched at midnight on 1 July 2017, with a special session of both houses of Parliament in the Central Hall.</p>
     <p class="boot-sub" id="boot-sub">Loading the scrutiny engine — usually takes under 10 seconds, once per visit.</p>
+  </div>
+</div>
+
+<div class="scrutiny-overlay" id="scrutiny-overlay" hidden>
+  <div class="scrutiny-card">
+    <div class="boot-spinner"></div>
+    <p class="scrutiny-title">Running full scrutiny…</p>
+    <p class="scrutiny-timer" id="scrutiny-timer">0s elapsed</p>
+    <div class="scrutiny-warning">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.3 3.9 2.8 17a1.6 1.6 0 0 0 1.4 2.4h15.6a1.6 1.6 0 0 0 1.4-2.4L13.7 3.9a1.6 1.6 0 0 0-2.8 0Z"/></svg>
+      <span>Do not close this tab, reload the page, or navigate away. This can take 10-30+ minutes for a full year with every optional source — closing or reloading will stop the scrutiny and you'll need to start it again.</span>
+    </div>
+    <p class="scrutiny-note">Runs entirely in this browser tab. Switching to another tab briefly is unlikely to stop it, but closing this tab will.</p>
   </div>
 </div>
 

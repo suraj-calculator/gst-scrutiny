@@ -877,6 +877,21 @@ function renderScrutinyError(err) {
   results.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
+// Warns on tab close/reload while a full-scrutiny run is in flight (per
+// explicit request, on top of the visual overlay below): a visual warning
+// only works if someone is actually looking at the screen at that moment --
+// this is a real browser-level guard against the actual destructive action
+// (closing/reloading the tab, which kills the Worker and the whole run).
+// Browsers ignore any custom string here and show their own generic "leave
+// site?" prompt, but a non-empty return value is still required to trigger
+// it at all. Does NOT catch switching to another tab (the Worker keeps
+// running in the background either way) -- the overlay's own copy says so.
+function beforeUnloadGuard(e) {
+  e.preventDefault();
+  e.returnValue = "";
+  return "";
+}
+
 document.getElementById("run-btn").addEventListener("click", async function () {
   if (this.disabled) return;
 
@@ -891,6 +906,8 @@ document.getElementById("run-btn").addEventListener("click", async function () {
   }
 
   const originalHtml = this.innerHTML;
+  const overlay = document.getElementById("scrutiny-overlay");
+  const overlayTimer = document.getElementById("scrutiny-timer");
   this.disabled = true;
   // Queued behind any still-running upload until the worker actually starts
   // on this call (see worker.js's queue) — the elapsed-time clock only
@@ -905,15 +922,17 @@ document.getElementById("run-btn").addEventListener("click", async function () {
     // slower still: a real large taxpayer (12 months, every optional source)
     // measured ~26-30 min end-to-end in the ACTUAL browser, confirmed by
     // directly driving the real UI (not extrapolated from native timing).
-    // Show elapsed time rather than a plain spinner, so a long wait reads
-    // as "working" instead of "frozen," and set an honest expectation
-    // instead of the old "1-3 minutes" estimate (measured before GSTR-2A/
-    // Annual Reports existed, on a smaller check set -- it was actively
-    // causing real, correctly-running scrutiny to look stuck).
+    // The big centered overlay (not just this button's own text) carries
+    // the live elapsed time and the "don't close this tab" warning now —
+    // per explicit request, that state used to be easy to miss since it
+    // was only ever small text inside the button itself.
+    overlay.hidden = false;
+    window.addEventListener("beforeunload", beforeUnloadGuard);
     tickHandle = setInterval(() => {
       const secs = Math.round((performance.now() - t0) / 1000);
-      this.innerHTML = `${ICONS.upload} Running full scrutiny… (${secs}s — a full year with every optional source can take 10-30+ minutes in-browser, please keep this tab open)`;
+      overlayTimer.textContent = `${secs}s elapsed`;
     }, 1000);
+    overlayTimer.textContent = "0s elapsed";
     this.innerHTML = `${ICONS.upload} Running full scrutiny…`;
   };
 
@@ -943,6 +962,8 @@ document.getElementById("run-btn").addEventListener("click", async function () {
     renderScrutinyError(err);
   } finally {
     if (tickHandle) clearInterval(tickHandle);
+    window.removeEventListener("beforeunload", beforeUnloadGuard);
+    overlay.hidden = true;
     this.innerHTML = originalHtml;
     updateRunbar();
   }
