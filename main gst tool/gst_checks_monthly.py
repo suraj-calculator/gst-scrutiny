@@ -1052,6 +1052,43 @@ def _in_detail_row_from_2b(xs, consign, note=""):
             "-", "Y", note + f"  (consignment Rs {round(consign, 2):,.2f})")
 
 
+def _own_month(date_str):
+    """'DD/MM/YYYY' -> 'Mon-YY' (same label format as raw.PERIOD_LABEL / EWB rows' own
+    'month' field), or None if unparseable.
+
+    BUG FIX (reported: EWB-In checks #10-#13 flagging real, matched invoices as having
+    'no matching inward EWB' -- confirmed against real data, GSTIN 05ASQPB9012R1ZA
+    FY2023-24, a QUARTERLY GSTR-2B filer): twob_lines['b2b']/['cdnr'] are scoped to the
+    marker BLOCK for the current month (see parse_2b_excel()'s own docstring) -- correct
+    for ITC-availability timing, but for a quarterly filer that block is the WHOLE
+    quarter, identical across all 3 of its months. ewb_in, by contrast, is scoped to
+    ONLY the exact calendar month (filter_by_month() on the EWB's own date). Matching
+    a quarter-wide invoice list against a single-month EWB list meant every quarterly
+    invoice got checked 3 times (once per month of its quarter): it matched correctly
+    in its own month, but was FALSELY flagged 'no matching inward EWB' in the other two
+    -- confirmed exactly this pattern on real data (e.g. invoice '313-450-23IVBR', dated
+    23/06/2023 with a real 23/06/2023 inward EWB, correctly absent from Jun-23's own
+    sheet but wrongly flagged under both Apr-23 and May-23).
+
+    Fixed at the point these checks build their invoice/note lookup, not in
+    parse_2b_excel() itself (which other callers -- e.g. the FY-wide 2B invoice index,
+    ITC-availability checks -- correctly rely on staying quarter-wide): narrow the
+    quarter-wide list down to rows whose own invoice/note date falls in the CURRENT
+    calendar month before it's used for EWB matching, restoring one-invoice-checked-
+    once. The invoice's own date (not its GSTR-1 filing period) is used because EWB
+    movement timing tracks the invoice date, not whenever the supplier happened to
+    file."""
+    m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", str(date_str or ""))
+    if not m:
+        return None
+    dd, mm, yyyy = m.groups()
+    try:
+        mm = int(mm)
+    except ValueError:
+        return None
+    return f"{mpu.CAL_MONTH_ABBR.get(mm, '?')}-{yyyy[2:]}"
+
+
 # ----------------------------------------------------------------------
 # THE 27 CHECKS
 # ----------------------------------------------------------------------
@@ -1131,7 +1168,12 @@ def run(ewb_out, ewb_in, g1inv, einv, g3b, b2b, ewb_out_file_supplied=True, ewb_
         cdnr_idx = {}
         twob_lines = b2b.get("_lines") if b2b_available else None
         if twob_lines:
-            for c in twob_lines["cdnr"]:
+            # Narrowed to this month's own notes (by their own date) -- same quarter-vs-month
+            # scoping mismatch as _own_month() documents for #10-#13 below applies here too
+            # (out_by_doc is month-scoped; twob_lines['cdnr'] is quarter-wide for a quarterly
+            # filer), and a VALUE-based match (state+taxable+tax, not invoice/note number) only
+            # gets MORE collision-prone against a 3x-larger, quarter-wide candidate pool.
+            for c in [c for c in twob_lines["cdnr"] if _own_month(c.get("date")) == raw.PERIOD_LABEL]:
                 ct = c["igst"] + c["cgst"] + c["sgst"]
                 cdnr_idx.setdefault((state_code(c["gstin"]) or c["gstin"][:2],
                                      round(c["taxable"], 2), round(ct, 2)), []).append(c)
@@ -1257,13 +1299,19 @@ def run(ewb_out, ewb_in, g1inv, einv, g3b, b2b, ewb_out_file_supplied=True, ewb_
         # genuinely taxable EWBs matched. Scoped to tax-bearing docs only, mirroring #1/#3's own
         # zero-tax exclusion.
         ewbset_taxbearing = {d for d in ewbset if sum(x["taxval"] for x in out_by_doc.get(d, [])) > TOL}
-        # #5 match
+        # #5 match. RENAMED (same reasoning as #1's own title fix above): the detail table
+        # here has always been the GAP list -- ewbset_taxbearing - einvset, i.e. the docs with
+        # NO e-invoice match -- but the title read as if it listed the matched ones, and
+        # gst_report.py's EWB Detail sheet silently excluded this ref entirely on the (here
+        # wrong) assumption that every ref in that exclusion list only ever holds confirmatory/
+        # matched rows. Title now says what the rows actually are; no longer excluded from the
+        # per-month EWB Detail sheet (see write_eway() in gst_report.py).
         em = ewbset_taxbearing & einvset
-        R.append(F("#5", "EWB-Out invoice present in E-Invoice", PASS if ewbset_taxbearing <= einvset else REVW,
+        R.append(F("#5", "EWB-Out doc(s) NOT present in E-Invoice", PASS if ewbset_taxbearing <= einvset else REVW,
                    f"{len(em)}/{len(ewbset_taxbearing)} TAX-BEARING EWB-Out doc-numbers found in e-invoice "
                    f"({len(ewbset) - len(ewbset_taxbearing)} zero-tax movements excluded -- e-invoicing "
                    f"applies to taxable B2B supplies only). (B2C / sub-threshold EWBs may legitimately "
-                   f"have no e-invoice.)",
+                   f"have no e-invoice.) Detail below is the docs with NO e-invoice match.",
                    [OUT_DETAIL_HDR] +
                    [_out_detail_row(d, out_by_doc, g1inv, einv, "no matching e-invoice")
                     for d in sorted(ewbset_taxbearing - einvset)]))
@@ -1356,7 +1404,15 @@ def run(ewb_out, ewb_in, g1inv, einv, g3b, b2b, ewb_out_file_supplied=True, ewb_
         pass  # SKIP findings for #10/#12/#13 already appended at top; #11 handled just below.
     elif twob_lines:
         # ---- LINE-LEVEL (2B Excel invoice list available) ----
-        b2b_inv = twob_lines["b2b"]
+        # NARROWED to this calendar month's own invoices/notes (by their own date) --
+        # twob_lines['b2b']/['cdnr'] are quarter-wide for a quarterly GSTR-2B filer; see
+        # _own_month()'s docstring for why EWB matching specifically needs month, not
+        # quarter, granularity (checks #10-#13 below). Other B2B/CDNR consumers (e.g. the
+        # ITC-availability summary) are untouched -- they read `b2b`/`twob_lines` directly,
+        # not this narrowed `b2b_inv`.
+        this_month = raw.PERIOD_LABEL
+        b2b_inv = [x for x in twob_lines["b2b"] if _own_month(x.get("date")) == this_month]
+        cdnr_inv = [c for c in twob_lines.get("cdnr", []) if _own_month(c.get("date")) == this_month]
         def nkey(g, n): return (str(g).strip().upper(), str(n).strip().upper())
         # primary index: (supplier, invoice-no).  value index: (supplier_state, taxable, tax)
         b2b_map, b2b_val = {}, {}
@@ -1370,7 +1426,7 @@ def run(ewb_out, ewb_in, g1inv, einv, g3b, b2b, ewb_out_file_supplied=True, ewb_
         # under a note reference rather than the original invoice number. Indexed the same way
         # as b2b_map, by (supplier_gstin, note_number).
         cdnr_map = {}
-        for c in twob_lines.get("cdnr", []):
+        for c in cdnr_inv:
             cdnr_map.setdefault(nkey(c["gstin"], c["note"]), []).append(c)
         ewbin_map = {}
         for e in ewb_in:
@@ -1508,6 +1564,35 @@ def run(ewb_out, ewb_in, g1inv, einv, g3b, b2b, ewb_out_file_supplied=True, ewb_
                    [IN_DETAIL_HDR] +
                    [_in_detail_row_from_2b(seen2b[k], c, "no matching inward EWB") for k, c in only_2b],
                    raw=raw13))
+
+        # #28 NEW CHECK (per explicit request): the inward mirror of #5's "EWB doc NOT in
+        # E-Invoice". There's no separate inward e-invoice FILE to compare against -- an
+        # e-invoice portal export for a GSTIN only ever contains invoices where THAT GSTIN is
+        # the supplier (outward). What actually tells you whether the SUPPLIER e-invoiced an
+        # inward supply is GSTR-2B's own per-invoice 'Source'/'IRN' columns (now read into
+        # parse_2b_excel()'s b2b/cdnr dicts): 'Source' reads "E-Invoice" with a real IRN when
+        # the supplier e-invoiced it, blank otherwise. Scoped to inward EWB docs that DO have a
+        # matched 2B invoice/note (#10/#12) -- an unmatched one is already #12's problem, not
+        # this one's. INFO, not FLAG: this tool cannot verify the SUPPLIER's own e-invoicing
+        # turnover threshold, so a missing IRN is a "verify", not a proven breach.
+        not_einvoiced = []
+        for k, (how, hit) in matched_exact.items():
+            src = (hit[0].get("einv_source") or "").strip()
+            irn = (hit[0].get("irn") or "").strip()
+            if src.lower() != "e-invoice" and not irn:
+                not_einvoiced.append((k[1], k[0], hit[0].get("supplier", ""),
+                                       round(sum(x["taxable"] for x in hit), 2),
+                                       "supplier invoice not e-invoiced (no IRN in 2B) -- verify if "
+                                       "e-invoicing was mandatory for this supplier"))
+        R.append(F("#28", "Inward EWB doc(s) -- supplier invoice NOT e-invoiced",
+                   INFO if not_einvoiced else PASS,
+                   f"{len(not_einvoiced)} matched inward EWB document(s) whose 2B invoice/note carries no "
+                   f"e-invoice IRN (GSTR-2B 'Source' != 'E-Invoice'). Informational: this tool cannot verify "
+                   f"whether e-invoicing was mandatory for that specific supplier -- verify against their "
+                   f"turnover." if not_einvoiced
+                   else "Every matched inward EWB document's 2B invoice/note carries a real e-invoice IRN.",
+                   [("Doc/Invoice No", "Supplier GSTIN", "Supplier Name", "2B Taxable (Rs)", "Note")]
+                   + not_einvoiced))
     else:
         # ---- AGGREGATE ONLY: either 2B wasn't supplied at all, or it was supplied but only
         # as a PDF summary (no line-level invoice list) -- these are different situations and
@@ -1533,6 +1618,9 @@ def run(ewb_out, ewb_in, g1inv, einv, g3b, b2b, ewb_out_file_supplied=True, ewb_
                    "Needs 2B invoice list (PDF summary insufficient)." if b2b_available
                    else "GSTR-2B not supplied.", []))
         R.append(F("#13", "2B entry but no EWB-In (>50k inter)", INFO if b2b_available else SKIP,
+                   "Needs 2B invoice list (PDF summary insufficient)." if b2b_available
+                   else "GSTR-2B not supplied.", []))
+        R.append(F("#28", "Inward EWB doc(s) -- supplier invoice NOT e-invoiced", INFO if b2b_available else SKIP,
                    "Needs 2B invoice list (PDF summary insufficient)." if b2b_available
                    else "GSTR-2B not supplied.", []))
 

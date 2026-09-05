@@ -1658,6 +1658,126 @@ def _read_cdnra_amendments(wb):
     return superseded, out_by_month
 
 
+_2B_FILE_CACHE = {}
+
+
+def _2b_b2b_columns(hmap, path):
+    c = dict(
+        gstin=_2b_col_exact(hmap, "GSTIN of supplier"),
+        supplier=_2b_col_exact(hmap, "Trade/Legal name"),
+        invno=_2b_col_exact(hmap, "Invoice number"),
+        invtype=_2b_col_exact(hmap, "Invoice type"),
+        date=_2b_col_exact(hmap, "Invoice Date"),
+        invval=_2b_col_contains(hmap, "invoicevalue"),
+        pos=_2b_col_exact(hmap, "Place of supply"),
+        rcm=_2b_col_contains(hmap, "reversecharge"),
+        rate=_2b_col_exact(hmap, "Rate(%)"),
+        taxable=_2b_col_contains(hmap, "taxablevalue"),
+        igst=_2b_col_exact(hmap, "Integrated Tax"),
+        cgst=_2b_col_exact(hmap, "Central Tax"),
+        sgst=_2b_col_contains(hmap, "stateut"),
+        cess=_2b_col_exact(hmap, "Cess"),
+        period=_2b_col_contains(hmap, "period"),
+        itcavail=_2b_col_exact(hmap, "ITC Availability"),
+        reason=_2b_col_exact(hmap, "Reason"),
+        source=_2b_col_exact(hmap, "Source"),
+        irn=_2b_col_exact(hmap, "IRN"),
+    )
+    if c["period"] is None:
+        raise mpu.PeriodParseError(
+            f"Could not locate the GSTR-1/IFF/GSTR-5 filing-period column by header text in "
+            f"the 'B2B' sheet of {path!r} -- the column layout may have changed again.")
+    return c
+
+
+def _2b_cdnr_columns(hmap, path):
+    c = dict(
+        gstin=_2b_col_exact(hmap, "GSTIN of supplier"),
+        supplier=_2b_col_exact(hmap, "Trade/Legal name"),
+        note=_2b_col_exact(hmap, "Note number"),
+        ntype=_2b_col_exact(hmap, "Note type"),
+        supplytype=_2b_col_exact(hmap, "Note Supply type"),
+        date=_2b_col_exact(hmap, "Note date"),
+        noteval=_2b_col_contains(hmap, "notevalue"),
+        pos=_2b_col_exact(hmap, "Place of supply"),
+        rate=_2b_col_exact(hmap, "Rate(%)"),
+        taxable=_2b_col_contains(hmap, "taxablevalue"),
+        igst=_2b_col_exact(hmap, "Integrated Tax"),
+        cgst=_2b_col_exact(hmap, "Central Tax"),
+        sgst=_2b_col_contains(hmap, "stateut"),
+        cess=_2b_col_exact(hmap, "Cess"),
+        period=_2b_col_contains(hmap, "period"),
+        itcavail=_2b_col_exact(hmap, "ITC Availability"),
+        reason=_2b_col_exact(hmap, "Reason"),
+        source=_2b_col_exact(hmap, "Source"),
+        irn=_2b_col_exact(hmap, "IRN"),
+    )
+    if c["period"] is None:
+        raise mpu.PeriodParseError(
+            f"Could not locate the GSTR-1/IFF/GSTR-5 filing-period column by header text in "
+            f"the 'B2B-CDNR' sheet of {path!r} -- the column layout may have changed again.")
+    return c
+
+
+def _load_2b_file_data(path):
+    """The expensive, MONTH-INDEPENDENT half of parsing a merged (whole-FY) GSTR-2B
+    workbook: one load_workbook() call, one full read of 'ITC Available' (if present),
+    'B2B' and 'B2B-CDNR' (rows + header-column map), and the whole-file amendment
+    indices -- everything parse_2b_excel(path, month) needs that does NOT depend on
+    `month`.
+
+    PERFORMANCE (restores the fix from 'Fix the 10-minute full-scrutiny timeout':
+    parse_2b_excel() was 24x redundant -- that cache was lost when this file was
+    replaced wholesale on 2026-09-04 while adding the marker-block-scoping fix below,
+    reintroducing the exact same cost this existed to remove): parse_2b_excel() is
+    called once per month from several independent call sites (master_build.py's
+    per-month loop AND its own FY-wide 2B invoice index, gst_checks_hsn_fraud.py,
+    gst_checks_flow.py) -- all against the exact same file. Without this cache, every
+    one of those calls independently repeats a full load_workbook() plus a full scan
+    of every 2B sheet. Cached by path, computed once; a failed load is never cached
+    (the exception propagates before the cache is written), so a genuinely broken
+    file still fails on every call, matching parse_2b_excel()'s original behaviour."""
+    if path in _2B_FILE_CACHE:
+        return _2B_FILE_CACHE[path]
+    if not path or not os.path.exists(path) or not path.lower().endswith((".xlsx", ".xlsm")):
+        raise mpu.PeriodParseError(f"Not a GSTR-2B Excel file: {path!r}")
+    wb = openpyxl.load_workbook(path, data_only=True)
+
+    # BUG FIX (found on a real taxpayer's export): 'ITC Available' missing used to be
+    # fatal for the whole file, even though B2B/B2B-CDNR parsing is structurally
+    # independent of it (each row carries its own columns; nothing about parsing them
+    # needs the summary sheet's marker blocks). Some real GSTR-2B exports genuinely
+    # only carry 'B2B'/'B2B-CDNR'. `itc_rows=None` here means "summary not available",
+    # handled per-month below.
+    itc_rows = list(wb["ITC Available"].iter_rows(values_only=True)) if "ITC Available" in wb.sheetnames else None
+
+    # ---------- amendment indices (whole-file, not month-scoped -- bug report §7) ----------
+    superseded_inv, b2ba_by_month = _read_b2ba_amendments(wb)
+    superseded_note, cdnra_by_month = _read_cdnra_amendments(wb)
+
+    b2b_all_rows, b2b_cols = None, None
+    if "B2B" in wb.sheetnames:
+        ws_b2b = wb["B2B"]
+        b2b_cols = _2b_b2b_columns(_2b_header_map(ws_b2b), path)
+        b2b_all_rows = list(ws_b2b.iter_rows(values_only=True))
+
+    cdnr_all_rows, cdnr_cols = None, None
+    if "B2B-CDNR" in wb.sheetnames:
+        ws_cdnr = wb["B2B-CDNR"]
+        cdnr_cols = _2b_cdnr_columns(_2b_header_map(ws_cdnr), path)
+        cdnr_all_rows = list(ws_cdnr.iter_rows(values_only=True))
+
+    data = dict(
+        itc_rows=itc_rows,
+        superseded_inv=superseded_inv, b2ba_by_month=b2ba_by_month,
+        superseded_note=superseded_note, cdnra_by_month=cdnra_by_month,
+        b2b_all_rows=b2b_all_rows, b2b_cols=b2b_cols,
+        cdnr_all_rows=cdnr_all_rows, cdnr_cols=cdnr_cols,
+    )
+    _2B_FILE_CACHE[path] = data
+    return data
+
+
 def parse_2b_excel(path, month):
     """Return dict(summary=..., b2b=[...], cdnr=[...], available=True) for ONE
     month out of the merged (whole-FY) GSTR-2B workbook.
@@ -1667,26 +1787,15 @@ def parse_2b_excel(path, month):
     stale original sits, and the amendment's own revised row is spliced in
     under the amendment's own filing period instead -- see
     _read_b2ba_amendments()/_read_cdnra_amendments() for why both halves of
-    that (exclude AND re-add, not just add) are necessary."""
-    if not path or not os.path.exists(path) or not path.lower().endswith((".xlsx", ".xlsm")):
-        raise mpu.PeriodParseError(f"Not a GSTR-2B Excel file: {path!r}")
-    wb = openpyxl.load_workbook(path, data_only=True)
+    that (exclude AND re-add, not just add) are necessary.
+
+    The expensive, month-independent parsing (one load_workbook(), one scan
+    each of every 2B sheet) happens once per file in _load_2b_file_data();
+    this function just does the cheap per-month lookup against that cache."""
+    d = _load_2b_file_data(path)
 
     # ---------- Summary (Table 3), quarter-block-scoped ----------
-    # BUG FIX (found on a real taxpayer's export): this used to raise a FATAL error if 'ITC
-    # Available' was missing, which blocked ALL invoice-level B2B/B2B-CDNR parsing too -- even
-    # though those are structurally independent (each B2B/CDNR row carries its own period
-    # column; nothing about parsing them needs the 'ITC Available' sheet's marker blocks,
-    # confirmed by reading the rest of this function). Some real GSTR-2B exports genuinely only
-    # carry 'B2B'/'B2B-CDNR' and nothing else (confirmed: one real taxpayer's file had exactly
-    # those two sheets, no 'ITC Available', no 'Read me', no B2BA/ECO/ISD/IMPG at all) -- for
-    # that shape of file, invoice-level parsing (which is what every real check in this tool
-    # actually uses -- see the docstring's own note that the summary is shown only as a control
-    # total) should still work. Now: if 'ITC Available' is missing, the summary degrades to an
-    # explicit not-available marker (matching the exact shape build_itc_3b_vs_2b's F7a already
-    # expects and handles -- summary['available']=False skips the control-total comparison
-    # instead of comparing against a fabricated zero) and B2B/CDNR parsing proceeds normally.
-    if "ITC Available" not in wb.sheetnames:
+    if d["itc_rows"] is None:
         summary = dict(
             ITC_all_other_IGST=0.0, ITC_all_other_CGST=0.0, ITC_all_other_SGST=0.0, ITC_all_other_CESS=0.0,
             ITC_rcm_IGST=0.0, ITC_rcm_CGST=0.0, ITC_rcm_SGST=0.0, ITC_rcm_CESS=0.0,
@@ -1697,14 +1806,8 @@ def parse_2b_excel(path, month):
                     "figures below are unaffected and are what every real check in this tool uses.",
         )
     else:
-        ws = wb["ITC Available"]
-        rows = list(ws.iter_rows(values_only=True))
-        start, end, group_index, group_count = mpu.find_block_and_index_for_month(rows, month)
-        summary = _summary_from_block(rows[start:end], group_index=group_index, group_count=group_count)
-
-    # ---------- amendment indices (whole-file, not month-scoped -- bug report §7) ----------
-    superseded_inv, b2ba_by_month = _read_b2ba_amendments(wb)
-    superseded_note, cdnra_by_month = _read_cdnra_amendments(wb)
+        start, end, group_index, group_count = mpu.find_block_and_index_for_month(d["itc_rows"], month)
+        summary = _summary_from_block(d["itc_rows"][start:end], group_index=group_index, group_count=group_count)
 
     # ---------- B2B invoice list, scoped by the MARKER BLOCK for `month` ----------
     # BUG FIX (bug report #1, ITC Annual Summary wrong every month -- confirmed on real data):
@@ -1729,64 +1832,55 @@ def parse_2b_excel(path, month):
     # manual count of that file), never re-filtered by the row's own internal period tag. The
     # per-row period is still read into `filed_period` below (best-effort) as reference data --
     # useful for spotting late-reported invoices -- but no longer gates inclusion.
+    #
+    # NOTE: for a QUARTERLY GSTR-2B filer, one marker block covers all 3 months of the quarter,
+    # so this month-scoped `b2b`/`cdnr` list is identical across those 3 months (the whole
+    # quarter, every time) -- correct for ITC-availability timing (the question this scoping was
+    # built for), but NOT the right list to match a specific calendar month's EWB movements
+    # against (see gst_checks_monthly.run()'s own per-row date filter for that -- checks #10-#13
+    # further narrow this list to each row's own invoice/note date before matching).
     b2b = []
-    if "B2B" in wb.sheetnames:
-        ws_b2b = wb["B2B"]
-        hmap = _2b_header_map(ws_b2b)
-        c_gstin = _2b_col_exact(hmap, "GSTIN of supplier")
-        c_supplier = _2b_col_exact(hmap, "Trade/Legal name")
-        c_invno = _2b_col_exact(hmap, "Invoice number")
-        c_invtype = _2b_col_exact(hmap, "Invoice type")
-        c_date = _2b_col_exact(hmap, "Invoice Date")
-        c_invval = _2b_col_contains(hmap, "invoicevalue")
-        c_pos = _2b_col_exact(hmap, "Place of supply")
-        c_rcm = _2b_col_contains(hmap, "reversecharge")
-        c_rate = _2b_col_exact(hmap, "Rate(%)")
-        c_taxable = _2b_col_contains(hmap, "taxablevalue")
-        c_igst = _2b_col_exact(hmap, "Integrated Tax")
-        c_cgst = _2b_col_exact(hmap, "Central Tax")
-        c_sgst = _2b_col_contains(hmap, "stateut")
-        c_cess = _2b_col_exact(hmap, "Cess")
-        c_period = _2b_col_contains(hmap, "period")
-        c_itcavail = _2b_col_exact(hmap, "ITC Availability")
-        c_reason = _2b_col_exact(hmap, "Reason")
-        if c_period is None:
-            raise mpu.PeriodParseError(
-                f"Could not locate the GSTR-1/IFF/GSTR-5 filing-period column by header text in "
-                f"the 'B2B' sheet of {path!r} -- the column layout may have changed again.")
-        all_rows_b2b = list(ws_b2b.iter_rows(values_only=True))
-        blk_start, blk_end = mpu.find_block_for_month(all_rows_b2b, month)
-        for r in all_rows_b2b[blk_start:blk_end]:
+    if d["b2b_cols"] is not None:
+        c = d["b2b_cols"]
+        blk_start, blk_end = mpu.find_block_for_month(d["b2b_all_rows"], month)
+        for r in d["b2b_all_rows"][blk_start:blk_end]:
             if not any(r) or not r[0] or mpu.is_marker_row(r):
                 continue
-            shift = _2b_row_rate_shift(r, c_period, c_rate)
-            eff_period_col = c_period + shift
+            shift = _2b_row_rate_shift(r, c["period"], c["rate"])
+            eff_period_col = c["period"] + shift
             try:
                 filed_period = _normalize_2b_row_period(
                     r[eff_period_col] if eff_period_col < len(r) else None)
             except mpu.PeriodParseError:
                 filed_period = None
-            gstin_val = _2b_g(r, c_gstin)
-            invno_val = _2b_g(r, c_invno)
-            if (gstin_val, invno_val.strip().upper()) in superseded_inv:
+            gstin_val = _2b_g(r, c["gstin"])
+            invno_val = _2b_g(r, c["invno"])
+            if (gstin_val, invno_val.strip().upper()) in d["superseded_inv"]:
                 # This exact original row has since been amended (B2BA carries a later, revised
                 # figure for it, spliced in below under the AMENDMENT's own period) -- counting
                 # this stale row too would double-count the invoice. See _read_b2ba_amendments().
                 continue
             b2b.append(dict(
-                gstin=gstin_val, supplier=_2b_g(r, c_supplier),
-                invno=invno_val, invtype=_2b_g(r, c_invtype),
-                date=_2b_g(r, c_date), invval=_2b_gn(r, c_invval),
-                pos=_2b_g(r, c_pos), rcm=_2b_g(r, c_rcm),
-                rate=(None if shift else _2b_gn(r, c_rate)),
-                taxable=_2b_gn(r, c_taxable + shift),
-                igst=_2b_gn(r, c_igst + shift), cgst=_2b_gn(r, c_cgst + shift), sgst=_2b_gn(r, c_sgst + shift),
-                cess=_2b_gn(r, c_cess + shift),
-                itc_avail=_2b_g(r, c_itcavail + shift), itc_avail_reason=_2b_g(r, c_reason + shift),
+                gstin=gstin_val, supplier=_2b_g(r, c["supplier"]),
+                invno=invno_val, invtype=_2b_g(r, c["invtype"]),
+                date=_2b_g(r, c["date"]), invval=_2b_gn(r, c["invval"]),
+                pos=_2b_g(r, c["pos"]), rcm=_2b_g(r, c["rcm"]),
+                rate=(None if shift else _2b_gn(r, c["rate"])),
+                taxable=_2b_gn(r, c["taxable"] + shift),
+                igst=_2b_gn(r, c["igst"] + shift), cgst=_2b_gn(r, c["cgst"] + shift), sgst=_2b_gn(r, c["sgst"] + shift),
+                cess=_2b_gn(r, c["cess"] + shift),
+                itc_avail=_2b_g(r, c["itcavail"] + shift), itc_avail_reason=_2b_g(r, c["reason"] + shift),
+                # 2B's own 'Source' column (== "E-Invoice" with a real IRN when the SUPPLIER
+                # e-invoiced this row) -- used by gst_checks_monthly's #28. Named 'einv_source',
+                # not 'source': gst_checks_flow.py does `dict(month=month, source="B2B", **x)` on
+                # these same dicts elsewhere, and a plain 'source' key here collided with that
+                # literal kwarg (TypeError: multiple values for 'source' -- confirmed on real data).
+                einv_source=(_2b_g(r, c["source"] + shift) if c["source"] is not None else ""),
+                irn=(_2b_g(r, c["irn"] + shift) if c["irn"] is not None else ""),
                 filed_period=filed_period, via_amendment=False,
             ))
     # splice in this month's amended (revised) invoice rows -- see _read_b2ba_amendments()
-    b2b.extend(b2ba_by_month.get(month, []))
+    b2b.extend(d["b2ba_by_month"].get(month, []))
 
     # ---------- B2B-CDNR (credit/debit notes), scoped by the MARKER BLOCK for `month` ----------
     # BUG FIX (bug report #1, same root cause as B2B above): rows are now scoped to the marker
@@ -1799,37 +1893,14 @@ def parse_2b_excel(path, month):
     # it's physically in, not by whether its own period tag could be read.
     cdnr = []
     cdnr_skipped = 0
-    if "B2B-CDNR" in wb.sheetnames:
-        ws_cdnr = wb["B2B-CDNR"]
-        hmap2 = _2b_header_map(ws_cdnr)
-        d_gstin = _2b_col_exact(hmap2, "GSTIN of supplier")
-        d_supplier = _2b_col_exact(hmap2, "Trade/Legal name")
-        d_note = _2b_col_exact(hmap2, "Note number")
-        d_ntype = _2b_col_exact(hmap2, "Note type")
-        d_supplytype = _2b_col_exact(hmap2, "Note Supply type")
-        d_date = _2b_col_exact(hmap2, "Note date")
-        d_noteval = _2b_col_contains(hmap2, "notevalue")
-        d_pos = _2b_col_exact(hmap2, "Place of supply")
-        d_rate = _2b_col_exact(hmap2, "Rate(%)")
-        d_taxable = _2b_col_contains(hmap2, "taxablevalue")
-        d_igst = _2b_col_exact(hmap2, "Integrated Tax")
-        d_cgst = _2b_col_exact(hmap2, "Central Tax")
-        d_sgst = _2b_col_contains(hmap2, "stateut")
-        d_cess = _2b_col_exact(hmap2, "Cess")
-        d_period = _2b_col_contains(hmap2, "period")
-        d_itcavail = _2b_col_exact(hmap2, "ITC Availability")
-        d_reason = _2b_col_exact(hmap2, "Reason")
-        if d_period is None:
-            raise mpu.PeriodParseError(
-                f"Could not locate the GSTR-1/IFF/GSTR-5 filing-period column by header text in "
-                f"the 'B2B-CDNR' sheet of {path!r} -- the column layout may have changed again.")
-        all_rows_cdnr = list(ws_cdnr.iter_rows(values_only=True))
-        blk_start, blk_end = mpu.find_block_for_month(all_rows_cdnr, month)
-        for r in all_rows_cdnr[blk_start:blk_end]:
+    if d["cdnr_cols"] is not None:
+        c = d["cdnr_cols"]
+        blk_start, blk_end = mpu.find_block_for_month(d["cdnr_all_rows"], month)
+        for r in d["cdnr_all_rows"][blk_start:blk_end]:
             if not any(r) or not r[0] or mpu.is_marker_row(r):
                 continue
-            shift = _2b_row_rate_shift(r, d_period, d_rate)
-            eff_period_col = d_period + shift
+            shift = _2b_row_rate_shift(r, c["period"], c["rate"])
+            eff_period_col = c["period"] + shift
             v = r[eff_period_col] if eff_period_col < len(r) else None
             if not (isinstance(v, str) and _2B_PERIOD_TAG_RE.match(v.strip())):
                 # Some B2B-CDNR rows have a MORE complex misalignment than the B2B sheet's clean
@@ -1837,7 +1908,7 @@ def parse_2b_excel(path, month):
                 # sitting where shift alone would put it. Try recovering it from this row's own
                 # Note Date column instead (same fallback as before this fix); this is now only
                 # used to populate the reference field below, not to decide inclusion.
-                v_from_date = _date_to_2b_period(r[d_date] if d_date is not None and d_date < len(r) else None)
+                v_from_date = _date_to_2b_period(r[c["date"]] if c["date"] is not None and c["date"] < len(r) else None)
                 v = v_from_date if v_from_date else None
             if v is None:
                 cdnr_skipped += 1
@@ -1847,26 +1918,28 @@ def parse_2b_excel(path, month):
                     filed_period = _normalize_2b_row_period(v)
                 except mpu.PeriodParseError:
                     filed_period = None
-            gstin_val = _2b_g(r, d_gstin)
-            note_val = _2b_g(r, d_note)
-            if (gstin_val, note_val.strip().upper()) in superseded_note:
+            gstin_val = _2b_g(r, c["gstin"])
+            note_val = _2b_g(r, c["note"])
+            if (gstin_val, note_val.strip().upper()) in d["superseded_note"]:
                 # Superseded by a later B2B-CDNRA entry -- see _read_cdnra_amendments().
                 continue
             cdnr.append(dict(
-                gstin=gstin_val, supplier=_2b_g(r, d_supplier),
-                note=note_val, ntype=_2b_g(r, d_ntype),
-                supplytype=_2b_g(r, d_supplytype), date=_2b_g(r, d_date),
-                noteval=_2b_gn(r, d_noteval), pos=_2b_g(r, d_pos),
-                rate=(None if shift else _2b_gn(r, d_rate)),
-                taxable=_2b_gn(r, d_taxable + shift),
-                igst=_2b_gn(r, d_igst + shift), cgst=_2b_gn(r, d_cgst + shift), sgst=_2b_gn(r, d_sgst + shift),
-                cess=_2b_gn(r, d_cess + shift),
-                itc_avail=(_2b_g(r, d_itcavail + shift) if d_itcavail is not None else ""),
-                itc_avail_reason=(_2b_g(r, d_reason + shift) if d_reason is not None else ""),
+                gstin=gstin_val, supplier=_2b_g(r, c["supplier"]),
+                note=note_val, ntype=_2b_g(r, c["ntype"]),
+                supplytype=_2b_g(r, c["supplytype"]), date=_2b_g(r, c["date"]),
+                noteval=_2b_gn(r, c["noteval"]), pos=_2b_g(r, c["pos"]),
+                rate=(None if shift else _2b_gn(r, c["rate"])),
+                taxable=_2b_gn(r, c["taxable"] + shift),
+                igst=_2b_gn(r, c["igst"] + shift), cgst=_2b_gn(r, c["cgst"] + shift), sgst=_2b_gn(r, c["sgst"] + shift),
+                cess=_2b_gn(r, c["cess"] + shift),
+                itc_avail=(_2b_g(r, c["itcavail"] + shift) if c["itcavail"] is not None else ""),
+                itc_avail_reason=(_2b_g(r, c["reason"] + shift) if c["reason"] is not None else ""),
+                einv_source=(_2b_g(r, c["source"] + shift) if c["source"] is not None else ""),
+                irn=(_2b_g(r, c["irn"] + shift) if c["irn"] is not None else ""),
                 filed_period=filed_period, via_amendment=False,
             ))
     # splice in this month's amended (revised) note rows -- see _read_cdnra_amendments()
-    cdnr.extend(cdnra_by_month.get(month, []))
+    cdnr.extend(d["cdnra_by_month"].get(month, []))
 
     # Only defaults to True if not already explicitly set (the 'ITC Available' sheet missing
     # branch above sets it to False and must not be clobbered back to True here).

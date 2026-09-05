@@ -469,8 +469,10 @@ def write_analysis14(ws, findings):
 
 
 def write_eway(ws_find, ws_det, findings):
-    """The 27-check EWB matrix + per-check detail — same content gst_eway_recon writes."""
-    ws_find.cell(1, 1, f"E-WAY BILL RECONCILIATION (27-check matrix) — {raw.PERIOD_LABEL}").font = TITLEF
+    """The 28-check EWB matrix + per-check detail — same content gst_eway_recon writes
+    (#1-#27 original, #28 added: inward EWB docs whose matched 2B invoice/note wasn't
+    e-invoiced -- see gst_checks_monthly.run())."""
+    ws_find.cell(1, 1, f"E-WAY BILL RECONCILIATION (28-check matrix) — {raw.PERIOD_LABEL}").font = TITLEF
     ws_find.cell(2, 1, f"GSTIN {eway.SELF_GSTIN}  |  {raw.COMPANY_NAME or '(company auto-detected)'}").font = Font(size=9, italic=True)
     counts = {s: sum(1 for x in findings if x.sev == s) for s in ("FLAG", "REVIEW", "INFO", "PASS", "SKIPPED")}
     ws_find.cell(3, 1, "  ".join(f"{s}: {c}" for s, c in counts.items())).font = Font(bold=True, size=10)
@@ -502,14 +504,21 @@ def write_eway(ws_find, ws_det, findings):
         # >= 1) now always gets its block, whether or not it has data rows underneath.
         # PER EXPLICIT REQUEST: the EWB Detail sheet should only carry rows worth investigating,
         # not a full listing of everything that's confirmed present/matched -- #1 ("EWB-Out
-        # invoice present in GSTR-1"), #5 ("EWB-Out invoice present in E-Invoice"), and #10
-        # ("EWB-In invoice matched to GSTR-2B") are confirmatory checks whose detail table is a
-        # listing of the MATCHED documents, not a mismatch -- removed from this sheet only.
-        # Nothing about the check itself changes: it still runs, and its ref/title/severity/
-        # summary-detail line still appears on the 'EWB' matrix sheet above (ws_find) exactly as
-        # before, so the pass/fail record for these three checks is not lost, only the bulky
-        # "here are all the matched documents" table that added no mismatch information here.
-        if f.rows and f.ref not in ("#1", "#5", "#10"):
+        # invoice present in GSTR-1") and #10 ("EWB-In invoice matched to GSTR-2B") are
+        # confirmatory checks whose detail table is a listing of the MATCHED documents, not a
+        # mismatch -- removed from this sheet only. Nothing about the check itself changes: it
+        # still runs, and its ref/title/severity/summary-detail line still appears on the 'EWB'
+        # matrix sheet above (ws_find) exactly as before, so the pass/fail record for these
+        # checks is not lost, only the bulky "here are all the matched documents" table that
+        # added no mismatch information here.
+        #
+        # BUG FIX (reported: a real "EWB doc NOT in e-invoice" gap was invisible on this sheet):
+        # #5 used to be listed alongside #1/#10 here on the assumption it also only lists matched
+        # docs -- it doesn't. #5's detail rows are, and have always been, the GAP list (docs with
+        # NO e-invoice match -- see gst_checks_monthly.run()'s #5), so excluding it here was
+        # silently hiding genuine mismatches. #5 removed from this exclusion; #28 (the inward
+        # mirror of #5, added alongside this fix) is a gap list too and was never excluded.
+        if f.rows and f.ref not in ("#1", "#10"):
             detail_blocks.append(f)
     for col, w in zip("ABCD", [6, 42, 10, 110]):
         ws_find.column_dimensions[col].width = w
