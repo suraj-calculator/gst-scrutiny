@@ -312,7 +312,7 @@ function slotSectionHtml(id, title, desc, slots, opts) {
               <span class="slot-sub"> &middot; ${sl.ext}</span>
             </span>
             <span class="slot-status">${opts.disabled ? "—" : "Empty"}</span>
-            ${opts.disabled ? "" : `<input type="file" data-slotinput="${id}:${sl.id}">`}
+            ${opts.disabled ? "" : `<button class="slot-clear" type="button" data-slotclear="${id}:${sl.id}">Clear</button><input type="file" data-slotinput="${id}:${sl.id}">`}
           </div>`).join("")}
       </div>
       ${opts.persist ? `<p class="persist-note">${ICONS.lock} Saved in this browser — you won't need to re-upload these next time.</p>` : ""}
@@ -452,13 +452,38 @@ function showResult(cfg, r, extraLine) {
   }
   setStatus(cfg.id, "ready", "Ready");
   const kb = (r.output_bytes.length / 1024).toFixed(0);
-  document.querySelector(`[data-result="${cfg.id}"]`).innerHTML = `
+  const resultBox = document.querySelector(`[data-result="${cfg.id}"]`);
+  resultBox.innerHTML = `
     <div class="result-line">
       ${ICONS.check}
       <p>${extraLine ? extraLine + "<br>" : ""}<span class="out-file">→ ${r.output_name}</span> (${kb} KB)</p>
+    </div>
+    <div class="result-actions">
+      <button class="btn small ghost" type="button" data-action="download">Download merged file</button>
+      <button class="btn small danger" type="button" data-action="clear">Clear</button>
     </div>`;
   workbench[cfg.id] = r;
+  // r.output_bytes/r.output_name are closed over here rather than re-read
+  // from workbench[cfg.id] on click, so a later Clear (which deletes that
+  // key) can never turn this button into a dead click.
+  resultBox.querySelector('[data-action="download"]').addEventListener("click", () => downloadBytes(r.output_bytes, r.output_name));
+  resultBox.querySelector('[data-action="clear"]').addEventListener("click", () => clearUploadSection(cfg));
   markDone(cfg.id);
+}
+
+// Resets one merge-type section back to empty — e.g. after realising the
+// wrong files were dropped in — without touching any other section's
+// progress or forcing a full page reload.
+function clearUploadSection(cfg) {
+  delete workbench[cfg.id];
+  document.querySelector(`[data-result="${cfg.id}"]`).innerHTML = "";
+  document.querySelector(`[data-filecount="${cfg.id}"]`).textContent = "";
+  const progWrap = document.querySelector(`[data-progress="${cfg.id}"]`);
+  if (progWrap) progWrap.innerHTML = "";
+  const input = document.querySelector(`[data-input="${cfg.id}"]`);
+  if (input) input.value = "";
+  setStatus(cfg.id, "empty", "Not started");
+  markUndone(cfg.id);
 }
 
 async function processSection(cfg, filePairs) {
@@ -556,9 +581,26 @@ function wireSlotSection(sectionId, slots, opts) {
       if (opts.persist) persistMaster(sl.id, file.name, bytes);
     }
 
+    // Resets just this one slot (e.g. the wrong file was dropped in) —
+    // stopPropagation so the click doesn't also bubble up to the parent
+    // .slot's own click-to-reopen-the-file-picker handler below.
+    function clear() {
+      delete workbench[key];
+      doneSlots.delete(sl.id);
+      delete el.dataset.done;
+      el.querySelector(".slot-icon").innerHTML = ICONS.file;
+      el.querySelector(".slot-status").textContent = "Empty";
+      input.value = "";
+      setStatus(sectionId, doneSlots.size === 0 ? "empty" : "processing", doneSlots.size === 0 ? "Not started" : `${doneSlots.size} of ${slots.length}`);
+      if (doneSlots.size === 0) markUndone(sectionId);
+      if (opts.persist) removePersistedMaster(sl.id);
+    }
+
     el.addEventListener("click", () => input.click());
     el.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); } });
     input.addEventListener("change", () => { if (input.files[0]) complete(input.files[0]); });
+    const clearBtn = document.querySelector(`[data-slotclear="${key}"]`);
+    if (clearBtn) clearBtn.addEventListener("click", e => { e.stopPropagation(); clear(); });
   });
   return { restore: (slotId, name, bytes) => {
     const el = document.querySelector(`[data-slot="${sectionId}:${slotId}"]`);
@@ -589,6 +631,15 @@ function persistMaster(slotId, name, bytes) {
     localStorage.setItem(MASTER_STORAGE_KEY, JSON.stringify(store));
   } catch (err) {
     console.warn("could not persist master file locally", err);
+  }
+}
+function removePersistedMaster(slotId) {
+  try {
+    const store = JSON.parse(localStorage.getItem(MASTER_STORAGE_KEY) || "{}");
+    delete store[slotId];
+    localStorage.setItem(MASTER_STORAGE_KEY, JSON.stringify(store));
+  } catch (err) {
+    console.warn("could not remove persisted master file locally", err);
   }
 }
 function loadPersistedMasters() {

@@ -199,6 +199,8 @@
   .btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .btn.ghost { background: transparent; }
   .btn.small { padding: 5px 10px; font-size: 11.5px; }
+  .btn.danger { color: var(--flag-fg); border-color: var(--flag-border); }
+  .btn.danger:hover { background: var(--flag-bg); }
 
   .progress-wrap { margin-top: 12px; }
   .progress-track { height: 5px; border-radius: 100px; background: var(--surface-3); overflow: hidden; }
@@ -212,6 +214,7 @@
   .result-line .out-file { font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: var(--pass-fg); }
   .result-line.error { background: var(--flag-bg); border-color: var(--flag-border); }
   .result-line.error svg { color: var(--flag-fg); }
+  .result-actions { display: flex; gap: 8px; margin-top: 10px; }
   .error-detail {
     margin: 8px 0 0;
     padding: 10px 12px;
@@ -242,6 +245,9 @@
   .slot-sub { font-size: 11px; color: var(--ink-faint); }
   .slot-status { margin-left: auto; font-size: 11.5px; color: var(--ink-faint); font-family: 'IBM Plex Mono', monospace; flex: none; }
   .slot[data-done="true"] .slot-status { color: var(--pass-fg); }
+  .slot-clear { display: none; flex: none; margin-left: 10px; padding: 3px 8px; font-size: 11px; font-weight: 600; border-radius: var(--radius-sm); border: 1px solid transparent; background: none; color: var(--ink-faint); cursor: pointer; }
+  .slot-clear:hover { color: var(--flag-fg); border-color: var(--flag-border); background: var(--flag-bg); }
+  .slot[data-done="true"] .slot-clear { display: inline-block; }
   .persist-note { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--ink-faint); margin-top: 12px; }
   .persist-note svg { width: 12px; height: 12px; }
 
