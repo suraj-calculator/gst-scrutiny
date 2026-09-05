@@ -58,15 +58,23 @@ async function init() {
     await micropip.install("fpdf2");
 
     post({ type: "status", state: "loading", text: "Loading the merge/align/extract scripts…" });
+    // cache: "reload" -- confirmed by direct testing (a page hard-reload, Ctrl+Shift+R
+    // included, was NOT enough to pick up a fixed .py file: the browser kept serving an
+    // HTTP-cache hit from an earlier visit indefinitely, since this static host sends no
+    // Cache-Control header for these files, only Last-Modified, which Chrome's heuristic
+    // caching happily reused across reloads). Without this, every returning visitor can
+    // get silently stuck on stale Python logic after any future deploy, with no error and
+    // no visible sign anything is wrong -- these files are small and fetched once per page
+    // load, so forcing a real network fetch here is essentially free.
     for (const rel of PY_FILES) {
-      const resp = await fetch(`py/${rel}`);
+      const resp = await fetch(`py/${rel}`, { cache: "reload" });
       if (!resp.ok) throw new Error(`failed to fetch py/${rel}: HTTP ${resp.status}`);
       const full = `/site/py/${rel}`;
       pyodide.FS.mkdirTree(full.substring(0, full.lastIndexOf("/")));
       pyodide.FS.writeFile(full, await resp.text());
     }
     for (const rel of BINARY_FILES) {
-      const resp = await fetch(`py/${rel}`);
+      const resp = await fetch(`py/${rel}`, { cache: "reload" });
       if (!resp.ok) throw new Error(`failed to fetch py/${rel}: HTTP ${resp.status}`);
       const full = `/site/py/${rel}`;
       pyodide.FS.mkdirTree(full.substring(0, full.lastIndexOf("/")));

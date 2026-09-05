@@ -153,7 +153,17 @@ function setRuntimeState(state, text) {
 function initRuntime() {
   setRuntimeState("loading", "Starting Python runtime…");
   showRandomBootFact();
-  worker = new Worker("worker.js");
+  // Cache-busting query string -- confirmed by direct testing that a plain
+  // `new Worker("worker.js")` can keep instantiating a stale cached copy of
+  // the WORKER SCRIPT ITSELF indefinitely (this static host sends no
+  // Cache-Control header, only Last-Modified, which the browser's own
+  // heuristic caching happily reuses across reloads, hard-reload included --
+  // a returning visitor can be silently stuck running old worker.js/Python
+  // logic after a deploy, with no error or visible sign anything is wrong).
+  // A query string makes every page load request a URL the cache has never
+  // seen, without touching how the worker resolves its own relative fetch()
+  // calls (those resolve against the path, not the query string).
+  worker = new Worker(`worker.js?_=${Date.now()}`);
   worker.onmessage = e => {
     const msg = e.data;
     if (msg.type === "status") {
