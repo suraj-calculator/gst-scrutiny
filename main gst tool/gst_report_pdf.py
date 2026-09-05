@@ -18,12 +18,36 @@ throughout this tool's output. DejaVu Sans (bundled in assets/, public-domain
 licensed) is the one confirmed working choice.
 """
 import os
+
+# Pyodide's stdlib has no real SSL/socket support, so two names fpdf2's
+# image_parsing.py touches at module import time (for optional
+# load-image-from-URL support this tool never uses -- every image call
+# here is local file/bytes, never a URL) don't exist there:
+#   urllib.request.HTTPSHandler       -> ImportError on the module-level
+#                                         `from urllib.request import (...)`
+#   http.client.HTTPSConnection       -> AttributeError: a class further
+#                                         down subclasses this directly
+#                                         (`class _PinnedRemoteHTTPSConnection
+#                                         (..., http.client.HTTPSConnection)`)
+# Both confirmed by testing directly in-browser (Pyodide 0.26.4) -- plain
+# CPython has real SSL support so it never hits either, which is why they
+# passed the local test_web_adapters.py run first. Harmless stubs are
+# enough since nothing in this module ever actually calls or instantiates
+# either one.
+import http.client
+import urllib.request
+if not hasattr(urllib.request, "HTTPSHandler"):
+    urllib.request.HTTPSHandler = type("HTTPSHandler", (), {})
+if not hasattr(http.client, "HTTPSConnection"):
+    http.client.HTTPSConnection = type("HTTPSConnection", (http.client.HTTPConnection,), {})
+
 from fpdf import FPDF
 import openpyxl
 
 FONT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "DejaVuSans.ttf")
 MAX_COLS = 20     # sheets wider than this have extra columns dropped, not wrapped -- keeps cells readable
-CELL_CHARS = 28    # per-cell text truncation
+CELL_CHARS = 200   # hard safety cap before width-fitting (avoids calling
+                   # get_string_width() char-by-char on a pathologically long value)
 ROW_H = 4
 FONT_SIZE = 6
 TITLE_SIZE = 12
@@ -59,6 +83,22 @@ def _sanitize(text):
     )
 
 
+def _fit_text(pdf, text, max_width):
+    # pdf.cell() draws whatever text it's given and advances by max_width
+    # regardless of how wide the text actually rendered -- on a sheet with
+    # many columns (col_w easily under 10mm) a merely 28-char value at 6pt
+    # can still be visually wider than its cell, overlapping straight into
+    # the next column's text (confirmed on a real run: Master Dashboard's
+    # 10-column layout came out with Result/Severity/Root ID/Level all
+    # bleeding into each other). Measuring actual rendered width and
+    # truncating with an ellipsis is the fix, not a fixed character count.
+    if pdf.get_string_width(text) <= max_width:
+        return text
+    while text and pdf.get_string_width(text + "...") > max_width:
+        text = text[:-1]
+    return (text + "...") if text else ""
+
+
 def _render_sheet(pdf, ws, title):
     pdf.add_page(orientation="L")
     pdf.set_font("dejavu", "", TITLE_SIZE)
@@ -66,10 +106,12 @@ def _render_sheet(pdf, ws, title):
     pdf.set_font("dejavu", "", FONT_SIZE)
     col_count = min(ws.max_column or 1, MAX_COLS)
     col_w = (pdf.w - 2 * pdf.l_margin) / col_count
+    cell_max_w = col_w - 1  # ~0.5mm padding on each side so text never touches the next cell
     rows = 0
     for row in ws.iter_rows(values_only=True):
         for val in row[:MAX_COLS]:
             text = "" if val is None else _sanitize(str(val))[:CELL_CHARS]
+            text = _fit_text(pdf, text, cell_max_w)
             pdf.cell(col_w, ROW_H, text, border=0)
         pdf.ln(ROW_H)
         rows += 1
