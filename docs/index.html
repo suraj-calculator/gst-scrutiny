@@ -40,6 +40,8 @@
     --radius-sm: 7px;
     --shadow-card: 0 1px 2px rgba(27,33,48,0.04), 0 1px 1px rgba(27,33,48,0.03);
     --shadow-pop: 0 12px 32px rgba(20,25,38,0.16), 0 2px 8px rgba(20,25,38,0.08);
+
+    --sidebar-w: 220px;
   }
 
   @media (prefers-color-scheme: dark) {
@@ -292,7 +294,7 @@
   .bspl-tag { font-size: 11.5px; color: var(--ink-faint); margin-bottom: 12px; }
   .bspl-tag .mono { color: var(--ink-muted); }
 
-  .runbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; background: var(--surface); border-top: 1px solid var(--border); box-shadow: 0 -8px 24px rgba(20,25,38,0.08); }
+  .runbar { position: fixed; left: var(--sidebar-w); right: 0; bottom: 0; z-index: 40; background: var(--surface); border-top: 1px solid var(--border); box-shadow: 0 -8px 24px rgba(20,25,38,0.08); }
   .runbar-inner { max-width: 1180px; margin: 0 auto; padding: 13px 24px; display: flex; align-items: center; gap: 22px; flex-wrap: wrap; }
   .readiness { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; }
   .readiness-chip { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--ink-muted); }
@@ -345,9 +347,169 @@
     .results { grid-column: 1; }
     .stat-row { grid-template-columns: repeat(2, 1fr); }
   }
+
+  /* ---------- login screen ---------- */
+  .login-overlay {
+    position: fixed; inset: 0; z-index: 200;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--bg);
+    padding: 24px;
+  }
+  .login-overlay[hidden] { display: none; }
+  .login-card {
+    width: 100%; max-width: 380px;
+    display: flex; flex-direction: column; gap: 18px;
+    padding: 36px 32px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: var(--shadow-pop);
+  }
+  .login-brand { display: flex; align-items: center; gap: 11px; }
+  .login-brand .glyph { width: 34px; height: 34px; border-radius: 8px; background: var(--brand); display: flex; align-items: center; justify-content: center; flex: none; }
+  .login-brand .glyph svg { width: 18px; height: 18px; }
+  .login-brand h1 { font-size: 18px; font-weight: 800; margin: 0; color: var(--ink); }
+  .login-brand p { font-size: 10.5px; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase; color: var(--ink-faint); margin: 2px 0 0; }
+  .login-field label { display: block; font-size: 11.5px; font-weight: 700; letter-spacing: 0.03em; color: var(--ink-muted); margin-bottom: 5px; }
+  .login-field input { width: 100%; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 9px 11px; font-size: 13.5px; color: var(--ink); }
+  .login-field input:focus-visible { border-color: var(--accent); }
+  .login-field + .login-field { margin-top: 14px; }
+  .login-error { font-size: 12.5px; font-weight: 600; color: var(--flag-fg); background: var(--flag-bg); border: 1px solid var(--flag-border); border-radius: var(--radius-sm); padding: 9px 11px; }
+  .login-error[hidden] { display: none; }
+  .btn-login { background: var(--accent); color: #fff; border: 1px solid var(--accent-ink); font-size: 13.5px; font-weight: 700; padding: 11px 16px; border-radius: var(--radius-sm); cursor: pointer; width: 100%; }
+  .btn-login:hover { background: var(--accent-ink); }
+
+  /* ---------- app shell / sidebar ---------- */
+  .app-shell { display: flex; min-height: 100vh; }
+  .app-shell[hidden] { display: none; }
+  .app-sidebar {
+    width: var(--sidebar-w); flex: none;
+    display: flex; flex-direction: column;
+    background: var(--surface); border-right: 1px solid var(--border);
+    padding: 20px 14px;
+    position: sticky; top: 0; height: 100vh;
+  }
+  .app-sidebar-brand { display: flex; align-items: center; gap: 10px; padding: 0 8px 20px; }
+  .app-sidebar-brand .glyph { width: 30px; height: 30px; border-radius: 7px; background: var(--brand); display: flex; align-items: center; justify-content: center; flex: none; }
+  .app-sidebar-brand .glyph svg { width: 16px; height: 16px; }
+  .app-sidebar-brand span { font-size: 14px; font-weight: 800; color: var(--ink); font-family: 'Archivo', sans-serif; }
+  .app-nav-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 12px; border-radius: var(--radius-sm);
+    font-size: 13px; font-weight: 600; color: var(--ink-muted);
+    background: none; border: 1px solid transparent; cursor: pointer;
+    text-align: left; width: 100%; margin-bottom: 3px;
+  }
+  .app-nav-item svg { width: 16px; height: 16px; flex: none; }
+  .app-nav-item:hover { background: var(--surface-2); color: var(--ink); }
+  .app-nav-item.active { background: var(--surface-2); border-color: var(--border); color: var(--ink); box-shadow: var(--shadow-card); }
+  .app-nav-item.logout { margin-top: auto; color: var(--flag-fg); }
+  .app-nav-item.logout:hover { background: var(--flag-bg); border-color: var(--flag-border); }
+  .app-main { flex: 1; min-width: 0; }
+  .app-view[hidden] { display: none; }
+
+  .welcome-view { max-width: 720px; margin: 0 auto; padding: 64px 24px; }
+  .welcome-view h1 { font-size: 26px; font-weight: 800; color: var(--ink); margin: 0 0 6px; }
+  .welcome-view .welcome-eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent-ink); background: var(--accent-tint); display: inline-flex; padding: 4px 9px; border-radius: 100px; margin-bottom: 12px; }
+  .welcome-view p { font-size: 14.5px; color: var(--ink-muted); line-height: 1.65; margin: 12px 0 0; }
+  .welcome-view .welcome-list { margin: 18px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 10px; }
+  .welcome-view .welcome-list li { display: flex; gap: 10px; align-items: flex-start; font-size: 13.5px; color: var(--ink); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px; }
+  .welcome-view .welcome-list svg { width: 16px; height: 16px; color: var(--accent); flex: none; margin-top: 1px; }
+  .welcome-view .btn-run { margin-top: 26px; }
+
+  @media (max-width: 880px) {
+    .app-shell { flex-direction: column; }
+    .app-sidebar { width: 100%; height: auto; position: sticky; top: 0; z-index: 10; flex-direction: row; align-items: center; padding: 10px 12px; overflow-x: auto; }
+    .app-sidebar-brand { padding: 0 10px 0 0; }
+    .app-nav-item { width: auto; white-space: nowrap; margin-bottom: 0; margin-right: 4px; }
+    .app-nav-item.logout { margin-top: 0; margin-left: auto; }
+    .runbar { left: 0; }
+  }
 </style>
 </head>
 <body>
+
+<div class="login-overlay" id="login-overlay">
+  <form class="login-card" id="login-form" autocomplete="off">
+    <div class="login-brand">
+      <span class="glyph">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h8l4 4v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M15 3v4h4"/><path d="M9 12h6M9 15.5h6M9 8.5h3"/></svg>
+      </span>
+      <div>
+        <p>GST 360&deg; Scrutiny Pipeline</p>
+        <h1>Sign in</h1>
+      </div>
+    </div>
+    <p class="login-error" id="login-error" hidden></p>
+    <div class="login-field">
+      <label for="login-username">Email</label>
+      <input id="login-username" type="email" required autocomplete="username">
+    </div>
+    <div class="login-field">
+      <label for="login-password">Password</label>
+      <input id="login-password" type="password" required autocomplete="current-password">
+    </div>
+    <button class="btn-login" type="submit">Sign in</button>
+  </form>
+</div>
+
+<div class="app-shell" id="app-shell" hidden>
+  <nav class="app-sidebar" aria-label="Main navigation">
+    <div class="app-sidebar-brand">
+      <span class="glyph">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h8l4 4v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M15 3v4h4"/><path d="M9 12h6M9 15.5h6M9 8.5h3"/></svg>
+      </span>
+      <span>Scrutiny Desk</span>
+    </div>
+    <button class="app-nav-item active" data-view="welcome" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12 12 4l8 8"/><path d="M6 10v9a1 1 0 0 0 1 1h3v-6h4v6h3a1 1 0 0 0 1-1v-9"/></svg>
+      Welcome
+    </button>
+    <button class="app-nav-item" data-view="scrutinize" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h8l4 4v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M14 3v4h4"/><path d="M9 12h6M9 15.5h6M9 8.5h3"/></svg>
+      Scrutinize
+    </button>
+    <button class="app-nav-item logout" id="logout-btn" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
+      Logout
+    </button>
+  </nav>
+
+  <div class="app-main">
+    <section class="app-view" id="view-welcome">
+      <div class="welcome-view">
+        <span class="welcome-eyebrow">GST 360&deg; Scrutiny Pipeline</span>
+        <h1>Welcome to Scrutiny Desk</h1>
+        <p>Scrutiny Desk cross-checks a taxpayer's GSTR-1, GSTR-3B, GSTR-2B, GSTR-2A,
+          E-Invoice and E-Way Bill data (plus optional GSTR-9/9C, department ledgers,
+          and Balance Sheet/P&amp;L figures) for a financial year, and produces one
+          master workbook of findings — mismatches, red flags, and forensic/fraud-pattern
+          checks, each tied to a specific section of GST law.</p>
+        <p>Everything runs inside this browser tab. Files you upload are never sent to
+          any server — the whole pipeline, from merging raw portal downloads to the
+          final scrutiny report, executes locally on your machine.</p>
+        <ul class="welcome-list">
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+            <span>Upload raw GST/E-Way Bill portal downloads — the tool merges, aligns and extracts them automatically.</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+            <span>Only GSTR-1 and GSTR-3B are required to run a scrutiny — every other source is optional and improves coverage.</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+            <span>The output is a single downloadable workbook with every check, flag, and cross-reference for the year.</span>
+          </li>
+        </ul>
+        <button class="btn-run" type="button" id="welcome-go-btn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+          Go to Scrutinize
+        </button>
+      </div>
+    </section>
+
+    <section class="app-view" id="view-scrutinize" hidden>
 
 <div class="boot-overlay" id="boot-overlay">
   <div class="boot-card">
@@ -432,6 +594,11 @@
 
 <div class="toast" id="toast"></div>
 
+    </section>
+  </div>
+</div>
+
+<script src="auth.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
