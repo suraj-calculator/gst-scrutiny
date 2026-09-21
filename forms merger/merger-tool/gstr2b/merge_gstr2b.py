@@ -64,11 +64,15 @@ month names of that period (e.g. April/May/June for a Q1 file) - since
 those can change from file to file, each period's own header is kept with
 its block instead of reusing a single shared header.
 """
+import os
+import shutil
+
 from openpyxl import Workbook, load_workbook
 from gst_merge_common import (
     find_xlsx_files, detect_file_type, fy_start_year, month_key,
     sheet_max_data_row, write_separator, HEADER_FONT, copy_sheet_full, warn_duplicates,
     robust_read_meta, looks_like_fy, looks_like_tax_period, meta_from_filename,
+    banner_periods,
 )
 
 # detect_file_type() return values that count as "a GSTR-2B file" for this
@@ -127,14 +131,31 @@ def read_meta(wb, path):
     if "Read me" in wb.sheetnames:
         return robust_read_meta(wb["Read me"], FIXED_CELLS, LABEL_FALLBACKS, path, VALIDATORS)
 
-    # Document-wise export - no Read me sheet, so fall back to the filename.
+    # No Read me sheet. Period source, in order of trust:
+    #   1. the portal-format filename,
+    #   2. the 'Financial Year | Tax Period | Date of Generation' banner rows INSIDE the
+    #      workbook (present in anything this tool already merged),
+    # and never a guess from invoice dates.
     meta = meta_from_filename(path)
-    if meta is None:
-        print(f"\n[SKIP] {path}")
-        print("  No 'Read me' sheet (document-wise export), and the filename")
-        print("  doesn't match '<ts>_<MMYYYY>_<GSTIN>_GSTR2B_<DDMMYYYY>_<n>.xlsx' -")
-        print("  can't determine its Tax Period/FY/GSTIN.")
-    return meta
+    if meta is not None:
+        return meta
+
+    periods = banner_periods(wb)
+    if len(periods) == 1:
+        (fy, tp, gen), = periods.keys()
+        print(f"  [info] {path}: no 'Read me' sheet and the filename is not in portal format -")
+        print(f"         Tax Period/FY taken from the in-sheet banner ({tp}, FY {fy}); GSTIN unknown.")
+        return {"fy": fy, "tax_period": tp, "gstin": "N/A", "legal_name": None, "generated_on": gen}
+    if len(periods) > 1:
+        return {"premerged": True, "periods": periods}
+
+    print(f"\n[SKIP] {path}")
+    print("  No 'Read me' sheet, the filename doesn't match")
+    print("  '<ts>_<MMYYYY>_<GSTIN>_GSTR2B_<DDMMYYYY>_<n>.xlsx', and the workbook has no")
+    print("  'Financial Year | Tax Period' banner rows. A raw per-period portal download carries")
+    print("  its period only in the filename/Read me - it can't be recovered from the data")
+    print("  (invoice dates are not the 2B period). Rename the file to the portal pattern.")
+    return None
 
 
 def sep_text(meta):
@@ -144,8 +165,22 @@ def sep_text(meta):
     )
 
 
+def pick_header_source(records_with_sheet, sheet_name, top_rows=10):
+    """The sheet the merged output's header block is copied from: the first period whose
+    sheet actually HAS header text. Not blindly records_with_sheet[0] -- a portal export of a
+    period with no rows on this sheet (e.g. no amendments that month) can be completely
+    empty, and copying its blank header left the merged sheet with no header at all, so no
+    parser could find its columns."""
+    for rec in records_with_sheet:
+        ws = rec["wb"][sheet_name]
+        for row in ws.iter_rows(min_row=1, max_row=top_rows, values_only=True):
+            if any(v not in (None, "") for v in row):
+                return ws
+    return records_with_sheet[0]["wb"][sheet_name]
+
+
 def merge_static_header_sheet(wb_out, sheet_name, records_with_sheet):
-    first_ws = records_with_sheet[0]["wb"][sheet_name]
+    first_ws = pick_header_source(records_with_sheet, sheet_name)
     header_rows = detect_header_rows(first_ws)
     n_cols = first_ws.max_column
     ws_out = wb_out.create_sheet(title=sheet_name[:31])
@@ -176,7 +211,7 @@ def merge_static_header_sheet(wb_out, sheet_name, records_with_sheet):
 
 
 def merge_repeat_header_sheet(wb_out, sheet_name, records_with_sheet):
-    first_ws = records_with_sheet[0]["wb"][sheet_name]
+    first_ws = pick_header_source(records_with_sheet, sheet_name)
     n_cols = first_ws.max_column
     ws_out = wb_out.create_sheet(title=sheet_name[:31])
 
@@ -201,6 +236,28 @@ def merge_repeat_header_sheet(wb_out, sheet_name, records_with_sheet):
             ws_out.column_dimensions[col_letter].width = dim.width
 
 
+def use_premerged(premerged, records):
+    """The input is ALREADY a merged (multi-period) GSTR-2B workbook -- it carries several
+    period banners. Re-merging would only re-stamp its periods, so hand it through unchanged
+    (byte-for-byte) as GSTR2B_Merged.xlsx. Mixing it with per-period files, or with a second
+    merged workbook, is refused: overlapping months would be double counted."""
+    if records or len(premerged) > 1:
+        names = [f for f, _ in premerged] + [r["path"] for r in records]
+        raise ValueError(
+            "Already-merged GSTR-2B workbook(s) can't be combined with other GSTR-2B files in "
+            "one run (overlapping periods would be double counted). Provide EITHER one merged "
+            "workbook OR the per-period files. Files: " + "; ".join(names))
+    f, periods = premerged[0]
+    print(f"{f} is already a merged GSTR-2B ({sum(periods.values())} period banners) - passing it through unchanged.")
+    for (fy, tp, gen), n in periods.items():
+        note = f"  ({n} blocks for this period - all are kept)" if n > 1 else ""
+        print(f"  FY {fy}, Tax Period {tp}{note}")
+    out_path = "GSTR2B_Merged.xlsx"
+    if os.path.abspath(f) != os.path.abspath(out_path):
+        shutil.copyfile(f, out_path)
+    print(f"\nSaved: {out_path}")
+
+
 def main(folder="."):
     files = find_xlsx_files(folder)
     gstr2b_files = [f for f in files if detect_file_type(f) in GSTR2B_TYPES]
@@ -210,14 +267,21 @@ def main(folder="."):
 
     records = []
     skipped = []
+    premerged = []
     for f in gstr2b_files:
         wb = load_workbook(f, data_only=True)
         meta = read_meta(wb, f)
         if meta is None:
             skipped.append(f)
             continue
+        if meta.get("premerged"):
+            premerged.append((f, meta["periods"]))
+            continue
         key = (fy_start_year(meta["fy"]), month_key(meta["tax_period"]))
         records.append({"path": f, "wb": wb, "meta": meta, "key": key})
+
+    if premerged:
+        return use_premerged(premerged, records)
 
     if not records:
         print("\nNo GSTR-2B file could be read - see the dump(s) above.")

@@ -1,0 +1,475 @@
+{
+  "_about": "GSTR-2B canonical layer - column mapping table (spec v1). To support a renamed portal column, add its spelling to the right field's 'exact' list. Names are compared after lower-casing and stripping every non-alphanumeric character, so spacing, hyphens, brackets and the rupee sign do not matter. 'contains' fragments are matched the same way (fragment appears inside the header). 'nth' picks the 1st/2nd... occurrence of a repeated header (B2BA/CDNRA repeat 'Invoice number' for ORIGINAL then REVISED details). 'required' = ERROR if the field cannot be found.",
+  "version": "1",
+  "sheets": {
+    "B2B": {
+      "raw_names": [
+        "B2B"
+      ],
+      "header_rows_above_data": 2,
+      "contains_order": "first_seen",
+      "fields": {
+        "gstin": {
+          "exact": [
+            "GSTIN of supplier"
+          ],
+          "required": true
+        },
+        "supplier": {
+          "exact": [
+            "Trade/Legal name"
+          ]
+        },
+        "invno": {
+          "exact": [
+            "Invoice number"
+          ],
+          "required": true
+        },
+        "invtype": {
+          "exact": [
+            "Invoice type"
+          ]
+        },
+        "date": {
+          "exact": [
+            "Invoice Date"
+          ]
+        },
+        "invval": {
+          "contains": [
+            "invoicevalue"
+          ],
+          "label": "Invoice Value(₹)"
+        },
+        "pos": {
+          "exact": [
+            "Place of supply"
+          ]
+        },
+        "rcm": {
+          "contains": [
+            "reversecharge"
+          ],
+          "label": "Supply Attract Reverse Charge"
+        },
+        "rate": {
+          "exact": [
+            "Rate(%)"
+          ]
+        },
+        "taxable": {
+          "contains": [
+            "taxablevalue"
+          ],
+          "required": true,
+          "label": "Taxable Value (₹)"
+        },
+        "igst": {
+          "exact": [
+            "Integrated Tax"
+          ],
+          "required": true
+        },
+        "cgst": {
+          "exact": [
+            "Central Tax"
+          ],
+          "required": true
+        },
+        "sgst": {
+          "contains": [
+            "stateut"
+          ],
+          "required": true,
+          "label": "State/UT Tax(₹)"
+        },
+        "cess": {
+          "exact": [
+            "Cess"
+          ],
+          "required": true
+        },
+        "period": {
+          "contains": [
+            "period"
+          ],
+          "label": "GSTR-1/1A/IFF/GSTR-5 Period"
+        },
+        "itc_avail": {
+          "exact": [
+            "ITC Availability"
+          ],
+          "required": true
+        },
+        "reason": {
+          "exact": [
+            "Reason"
+          ]
+        },
+        "source": {
+          "exact": [
+            "Source"
+          ]
+        },
+        "irn": {
+          "exact": [
+            "IRN"
+          ]
+        }
+      }
+    },
+    "CDNR": {
+      "raw_names": [
+        "B2B-CDNR",
+        "CDNR"
+      ],
+      "header_rows_above_data": 2,
+      "contains_order": "first_seen",
+      "fields": {
+        "gstin": {
+          "exact": [
+            "GSTIN of supplier"
+          ],
+          "required": true
+        },
+        "supplier": {
+          "exact": [
+            "Trade/Legal name"
+          ]
+        },
+        "note": {
+          "exact": [
+            "Note number"
+          ],
+          "required": true
+        },
+        "ntype": {
+          "exact": [
+            "Note type"
+          ]
+        },
+        "supplytype": {
+          "exact": [
+            "Note Supply type"
+          ]
+        },
+        "date": {
+          "exact": [
+            "Note date"
+          ]
+        },
+        "noteval": {
+          "contains": [
+            "notevalue"
+          ],
+          "label": "Note Value (₹)"
+        },
+        "pos": {
+          "exact": [
+            "Place of supply"
+          ]
+        },
+        "rate": {
+          "exact": [
+            "Rate(%)"
+          ]
+        },
+        "taxable": {
+          "contains": [
+            "taxablevalue"
+          ],
+          "required": true,
+          "label": "Taxable Value (₹)"
+        },
+        "igst": {
+          "exact": [
+            "Integrated Tax"
+          ],
+          "required": true
+        },
+        "cgst": {
+          "exact": [
+            "Central Tax"
+          ],
+          "required": true
+        },
+        "sgst": {
+          "contains": [
+            "stateut"
+          ],
+          "required": true,
+          "label": "State/UT Tax(₹)"
+        },
+        "cess": {
+          "exact": [
+            "Cess"
+          ],
+          "required": true
+        },
+        "period": {
+          "contains": [
+            "period"
+          ],
+          "label": "GSTR-1/1A/IFF/GSTR-5 Period"
+        },
+        "itc_avail": {
+          "exact": [
+            "ITC Availability"
+          ]
+        },
+        "reason": {
+          "exact": [
+            "Reason"
+          ]
+        },
+        "source": {
+          "exact": [
+            "Source"
+          ]
+        },
+        "irn": {
+          "exact": [
+            "IRN"
+          ]
+        }
+      }
+    },
+    "B2BA": {
+      "raw_names": [
+        "B2BA"
+      ],
+      "header_rows_above_data": 2,
+      "contains_order": "by_column",
+      "fields": {
+        "orig_invno": {
+          "exact": [
+            "Invoice number"
+          ],
+          "nth": 0,
+          "required": true
+        },
+        "orig_date": {
+          "exact": [
+            "Invoice Date"
+          ],
+          "nth": 0
+        },
+        "gstin": {
+          "exact": [
+            "GSTIN of supplier"
+          ],
+          "required": true
+        },
+        "supplier": {
+          "exact": [
+            "Trade/Legal name"
+          ]
+        },
+        "invno": {
+          "exact": [
+            "Invoice number"
+          ],
+          "nth": 1
+        },
+        "invtype": {
+          "exact": [
+            "Invoice type"
+          ]
+        },
+        "date": {
+          "exact": [
+            "Invoice Date"
+          ],
+          "nth": 1
+        },
+        "invval": {
+          "contains": [
+            "invoicevalue"
+          ],
+          "label": "Invoice Value(₹)"
+        },
+        "pos": {
+          "exact": [
+            "Place of supply"
+          ]
+        },
+        "rcm": {
+          "contains": [
+            "reversecharge"
+          ],
+          "label": "Supply Attract Reverse Charge"
+        },
+        "rate": {
+          "contains": [
+            "taxrate"
+          ],
+          "label": "Applicable % of Tax Rate"
+        },
+        "taxable": {
+          "contains": [
+            "taxablevalue"
+          ],
+          "label": "Taxable Value (₹)"
+        },
+        "igst": {
+          "exact": [
+            "Integrated Tax"
+          ]
+        },
+        "cgst": {
+          "exact": [
+            "Central Tax"
+          ]
+        },
+        "sgst": {
+          "contains": [
+            "stateut"
+          ],
+          "label": "State/UT Tax(₹)"
+        },
+        "cess": {
+          "exact": [
+            "Cess"
+          ]
+        },
+        "period": {
+          "contains": [
+            "period"
+          ],
+          "required": true,
+          "label": "GSTR-1/1A/IFF/GSTR-5 Period"
+        },
+        "itc_avail": {
+          "exact": [
+            "ITC Availability"
+          ]
+        },
+        "reason": {
+          "exact": [
+            "Reason"
+          ]
+        }
+      }
+    },
+    "CDNRA": {
+      "raw_names": [
+        "B2B-CDNRA",
+        "CDNRA"
+      ],
+      "header_rows_above_data": 2,
+      "contains_order": "by_column",
+      "fields": {
+        "ntype_orig": {
+          "exact": [
+            "Note type"
+          ],
+          "nth": 0
+        },
+        "orig_note": {
+          "exact": [
+            "Note number"
+          ],
+          "nth": 0,
+          "required": true
+        },
+        "orig_date": {
+          "exact": [
+            "Note date"
+          ],
+          "nth": 0
+        },
+        "gstin": {
+          "exact": [
+            "GSTIN of supplier"
+          ],
+          "required": true
+        },
+        "supplier": {
+          "exact": [
+            "Trade/Legal name"
+          ]
+        },
+        "note": {
+          "exact": [
+            "Note number"
+          ],
+          "nth": 1
+        },
+        "ntype": {
+          "exact": [
+            "Note type"
+          ],
+          "nth": 1
+        },
+        "supplytype": {
+          "exact": [
+            "Note Supply type"
+          ]
+        },
+        "date": {
+          "exact": [
+            "Note date"
+          ],
+          "nth": 1
+        },
+        "noteval": {
+          "contains": [
+            "notevalue"
+          ],
+          "label": "Note Value (₹)"
+        },
+        "pos": {
+          "exact": [
+            "Place of supply"
+          ]
+        },
+        "rate": {
+          "contains": [
+            "taxrate"
+          ],
+          "label": "Applicable % of Tax Rate"
+        },
+        "taxable": {
+          "contains": [
+            "taxablevalue"
+          ],
+          "label": "Taxable Value (₹)"
+        },
+        "igst": {
+          "exact": [
+            "Integrated Tax"
+          ]
+        },
+        "cgst": {
+          "exact": [
+            "Central Tax"
+          ]
+        },
+        "sgst": {
+          "contains": [
+            "stateut"
+          ],
+          "label": "State/UT Tax(₹)"
+        },
+        "cess": {
+          "exact": [
+            "Cess"
+          ]
+        },
+        "period": {
+          "contains": [
+            "period"
+          ],
+          "required": true,
+          "label": "GSTR-1/1A/IFF/GSTR-5 Period"
+        }
+      }
+    },
+    "ITC": {
+      "raw_names": [
+        "ITC Available"
+      ]
+    }
+  }
+}

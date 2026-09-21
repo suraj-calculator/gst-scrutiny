@@ -792,6 +792,8 @@ function renderScrutinyResult(result) {
   const gstin = gstinField.value.trim();
   const fy = fyField.value.trim();
   const kb = (result.output_bytes.length / 1024).toFixed(0);
+  const canonFiles = result.canonical_files || (result.canonical_2b ? [result.canonical_2b] : []);
+  const canonIssues = result.canonical_issues || [];
 
   results.hidden = false;
   results.innerHTML = `
@@ -813,12 +815,31 @@ function renderScrutinyResult(result) {
           <button class="btn" id="download-pdf-btn" type="button">Download PDF</button>
         </div>
       </div>
+      ${canonFiles.map((c, i) => `
+      <div class="download-row">
+        <div>
+          <div class="fname">${escapeHtml(c.name)}</div>
+          <div class="fmeta">${(c.bytes.length / 1024).toFixed(0)} KB &middot; converted to the fixed canonical format &mdash; every value traceable to its source row; mapping report and issues inside</div>
+        </div>
+        <div class="download-btns">
+          <button class="btn" id="download-canon-${i}" type="button">Download canonical file</button>
+        </div>
+      </div>`).join("")}
+      ${canonIssues.length ? `
+      <details class="run-log" open>
+        <summary>Conversion notes (${canonIssues.length})</summary>
+        <pre>${escapeHtml(canonIssues.map(i => `[${i.severity}] ${i.source || "GSTR-2B"} ${i.id}: ${i.message}`).join("\n\n"))}</pre>
+      </details>` : ""}
       <details class="run-log">
         <summary>Full run log</summary>
         <pre>${log.replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]))}</pre>
       </details>
     </section>`;
   document.getElementById("download-btn").addEventListener("click", () => downloadBytes(result.output_bytes, result.output_name));
+  canonFiles.forEach((c, i) => {
+    const btn = document.getElementById(`download-canon-${i}`);
+    if (btn) btn.addEventListener("click", () => downloadBytes(c.bytes, c.name));
+  });
 
   const pdfBtn = document.getElementById("download-pdf-btn");
   const pdfName = result.output_name.replace(/\.xlsx$/i, ".pdf");

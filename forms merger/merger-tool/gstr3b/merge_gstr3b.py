@@ -9,6 +9,9 @@ It will detect every GSTR-3B file in the folder (by content, not filename),
 sort them chronologically by Tax Period, and produce GSTR3B_Merged.xlsx with
 one full-formatting sheet per source file, ordered left to right by month.
 """
+import os
+import shutil
+
 from openpyxl import Workbook, load_workbook
 from gst_merge_common import (
     find_xlsx_files, detect_file_type, fy_start_year, month_key, copy_sheet_full,
@@ -36,9 +39,56 @@ def read_meta(ws):
     }
 
 
+OUT_NAME = "GSTR3B_Merged.xlsx"
+
+
+def premerged_sheets(path):
+    """Sheets of `path` that are each a GSTR-3B return (the 'Form GSTR-3B' banner plus Year and Tax
+    Period rows). A workbook with 2+ of them is an ALREADY-MERGED 3B (one sheet per month) - e.g. this
+    tool's own output - which the per-period detection (a single sheet named 'GSTR-3B') never accepted."""
+    try:
+        wb = load_workbook(path, read_only=True, data_only=True)
+    except Exception:  # noqa: BLE001
+        return []
+    ok = []
+    try:
+        for sn in wb.sheetnames:
+            banner = fy = tp = False
+            for i, row in enumerate(wb[sn].iter_rows(values_only=True)):
+                if i > 30:
+                    break
+                cells = [str(c).strip() for c in row if c not in (None, "")]
+                if any("Form GSTR-3B" in c for c in cells):
+                    banner = True
+                if len(cells) >= 2 and cells[0].lower() in ("year", "financial year"):
+                    fy = True
+                if len(cells) >= 2 and cells[0].lower() == "tax period":
+                    tp = True
+            if banner and fy and tp:
+                ok.append(sn)
+    finally:
+        wb.close()
+    return ok
+
+
 def main(folder="."):
     files = find_xlsx_files(folder)
     gstr3b_files = [f for f in files if detect_file_type(f) == "GSTR3B"]
+    # Already-merged 3B (its own output name is ignored, so a stale GSTR3B_Merged.xlsx is never re-read).
+    premerged = [f for f in files if f not in gstr3b_files and os.path.basename(f) != OUT_NAME
+                 and len(premerged_sheets(f)) >= 2]
+    if premerged:
+        if gstr3b_files or len(premerged) > 1:
+            raise ValueError(
+                "An already-merged GSTR-3B workbook can't be combined with other GSTR-3B files in one run "
+                "(overlapping months would be double counted). Provide EITHER one merged workbook OR the "
+                "per-period files. Files: " + "; ".join(premerged + gstr3b_files))
+        f = premerged[0]
+        print(f"{f} is already a merged GSTR-3B ({len(premerged_sheets(f))} monthly sheets) - passing it through unchanged.")
+        if os.path.abspath(f) != os.path.abspath(OUT_NAME):
+            shutil.copyfile(f, OUT_NAME)
+        print(f"\nSaved: {OUT_NAME}")
+        return
     if not gstr3b_files:
         print("No GSTR-3B files found in this folder.")
         return
@@ -77,7 +127,7 @@ def main(folder="."):
         used_names.add(name[:31])
         copy_sheet_full(rec["ws"], wb_out, name)
 
-    out_path = "GSTR3B_Merged.xlsx"
+    out_path = OUT_NAME
     wb_out.save(out_path)
     print(f"\nSaved: {out_path}")
 

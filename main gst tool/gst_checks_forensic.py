@@ -929,6 +929,9 @@ def gstr3b_arn_dates_by_month(gstr3b_path):
     """Return {month_label: {'arn': str|None, 'date': date|None}}. GSTR-3B is
     one SHEET per month, and each sheet already carries its own 'Date of ARN'
     key/value row -- genuinely per-month, no fallback needed."""
+    if mpu.use_canonical_3b(gstr3b_path):
+        import gstr3b_adapter
+        return gstr3b_adapter.arn_dates_by_month(gstr3b_path)
     out = {}
     wb = openpyxl.load_workbook(gstr3b_path, data_only=True)
     for sn in wb.sheetnames:

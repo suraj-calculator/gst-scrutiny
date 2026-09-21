@@ -196,6 +196,33 @@ def find_block_for_month(all_rows, month_label):
     )
 
 
+def find_blocks_for_month(all_rows, month_label):
+    """Like find_block_for_month, but returns EVERY (start, end) block whose marker covers
+    `month_label`, in sheet order -- not just the first.
+
+    Why: the GST portal caps a document-wise GSTR-2B download at 1,000 rows per sheet and
+    offers the remainder as a second file for the SAME period. Merging both yields two marker
+    blocks for one month (confirmed real: October 2024 = 1,000 + 326 B2B rows, 0 overlap).
+    find_block_for_month() sees only the first, so the other 326 invoices were silently ignored.
+    Raises PeriodParseError if no marker covers the month, exactly like find_block_for_month."""
+    marker_positions = []
+    for i, row in enumerate(all_rows):
+        if is_marker_row(row):
+            _, _, labels = parse_marker_text(str(row[0]))
+            marker_positions.append((i, labels))
+    blocks = []
+    for idx, (row_idx, labels) in enumerate(marker_positions):
+        if month_label in labels:
+            end = marker_positions[idx + 1][0] if idx + 1 < len(marker_positions) else len(all_rows)
+            blocks.append((row_idx + 1, end))
+    if not blocks:
+        raise PeriodParseError(
+            f"Month {month_label!r} not covered by any period marker in this sheet. "
+            f"Markers found: {[lbl for _, lbl in marker_positions]}"
+        )
+    return blocks
+
+
 def find_block_and_index_for_month(all_rows, month_label):
     """Like find_block_for_month, but ALSO returns WHICH position (0-based)
     month_label occupies within its marker's own label list, and how many
@@ -271,6 +298,34 @@ def _sheetnames(path):
     return sn
 
 
+_GSTR2B_TITLE_RE = re.compile(r"GSTR[\s-]*2B", re.I)
+
+
+def _looks_like_gstr2b_by_title(path):
+    """Content signature for a GSTR-2B workbook that does NOT depend on the 'Read me'
+    sheet, the 'ITC Available' sheet, or which optional sheets (B2BA, ...) happen to be
+    present: every 2B line-item sheet carries the form title ('Goods and Services Tax  -
+    GSTR-2B', or '... GSTR-2B (Quarterly)') in the first rows, exactly like GSTR-2A carries
+    'GSTR 2A' (see _looks_like_r2a_merged) and Table 8A carries 'GSTR-8A'.
+
+    Reason this exists: the earlier shape-only rules missed a real merged 2B whose sheets
+    were {B2B, B2BA, B2B-CDNR} -- no 'Read me', no 'ITC Available', but WITH 'B2BA' -- so
+    it matched none of them, was never classified as GSTR-2B, and every 2B-dependent check
+    then reported 'GSTR-2B not supplied'. Title text is the safer signal."""
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    try:
+        for sn in ("B2B", "B2B-CDNR", "B2BA", "B2B-CDNRA", "ITC Available"):
+            if sn not in wb.sheetnames:
+                continue
+            for row in wb[sn].iter_rows(min_row=1, max_row=4, values_only=True):
+                for c in row:
+                    if c and _GSTR2B_TITLE_RE.search(str(c)):
+                        return True
+    finally:
+        wb.close()
+    return False
+
+
 def _looks_like_r2a_merged(path):
     """Content signature for the merged GSTR-2A workbook: its own sheets carry
     the literal 'GSTR 2A' / 'GSTR-2A' / 'GSTR2A' banner text (spacing/hyphen
@@ -302,10 +357,39 @@ def _looks_like_r2a_merged(path):
     return False
 
 
+def use_canonical_3b(path):
+    """True when GSTR-3B should be read through the canonical layer (gstr3b_adapter.py): the switch
+    gst_config.GSTR3B_USE_CANONICAL (or env GST_3B_CANONICAL=1/0) is on, or `path` already IS a
+    canonical 3B workbook."""
+    env = os.environ.get("GST_3B_CANONICAL")
+    if env is not None:
+        on = env.strip() == "1"
+    else:
+        try:
+            import gst_config
+            on = bool(getattr(gst_config, "GSTR3B_USE_CANONICAL", False))
+        except ImportError:
+            on = False
+    if on:
+        return True
+    try:
+        import gstr3b_adapter
+        return gstr3b_adapter.is_canonical_file(path)
+    except ImportError:
+        return False
+
+
 def _looks_like_gstr3b_merged(path):
     """Content signature for the merged GSTR-3B workbook: at least one sheet
     contains the literal 'Form GSTR-3B' banner text. Sheet NAMES (e.g.
-    'Jan_2022-23') are never consulted, per instruction."""
+    'Jan_2022-23') are never consulted, per instruction. A canonical 3B workbook (META + RETURNS +
+    LINES sheets, see gstr3b_adapter.py) is recognised by its schema_version."""
+    try:
+        import gstr3b_adapter
+        if gstr3b_adapter.is_canonical_file(path):
+            return True
+    except ImportError:
+        pass
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
         for sn in wb.sheetnames:
@@ -348,6 +432,12 @@ def _gstr2b_months(path):
     recognised it as a GSTR-2B file. 'B2B' carries the identical period-marker format ('Financial
     Year: ... | Tax Period: ...' rows) -- confirmed directly against this taxpayer's real file --
     so it's a safe, equivalent fallback source for month coverage when 'ITC Available' is absent."""
+    try:
+        import gstr2b_adapter
+        if gstr2b_adapter.is_canonical_file(path):
+            return gstr2b_adapter.months_from_canonical(path)
+    except ImportError:
+        pass
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
         sheet_name = "ITC Available" if "ITC Available" in wb.sheetnames else "B2B"
@@ -361,6 +451,13 @@ def _gstr2b_months(path):
 
 
 def _gstr3b_months(path):
+    if use_canonical_3b(path):
+        import gstr3b_adapter
+        return gstr3b_adapter.months(path)
+    return _gstr3b_months_raw(path)
+
+
+def _gstr3b_months_raw(path):
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     months = set()
     try:
@@ -386,6 +483,40 @@ def _gstr3b_months(path):
     finally:
         wb.close()
     return months
+
+
+def _gstr3b_gstin_and_name(path):
+    if use_canonical_3b(path):
+        import gstr3b_adapter
+        return gstr3b_adapter.gstin_and_name(path)
+    return _gstr3b_gstin_and_name_raw(path)
+
+
+def _gstr3b_gstin_and_name_raw(path):
+    """(GSTIN, Legal name) from the header block of the first sheet of a merged GSTR-3B that
+    has them, read by label ('GSTIN', 'Legal name of the registered person') -- content, not
+    position. Returns (None, None) for whatever it can't find; never guesses."""
+    gstin_re = re.compile(r"^\d{2}[A-Z]{5}\d{4}[A-Z]\d[A-Z][A-Z\d]$")
+    gstin = name = None
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    try:
+        for sn in wb.sheetnames:
+            for i, row in enumerate(wb[sn].iter_rows(values_only=True)):
+                if i > 30:
+                    break
+                cells = [str(c).strip() for c in row if c not in (None, "")]
+                if len(cells) < 2:
+                    continue
+                label = cells[0].lower()
+                if label == "gstin" and gstin_re.match(cells[1].upper()):
+                    gstin = gstin or cells[1].upper()
+                elif label.startswith("legal name"):
+                    name = name or cells[1]
+            if gstin and name:
+                break
+    finally:
+        wb.close()
+    return gstin, name
 
 
 def _csv_first_line(path):
@@ -520,7 +651,23 @@ def classify_folder(folder="."):
             continue
         if "b2b, sez, de_inv" in sn and "hsn" in sn:
             gstr1_files.append(f); continue
+        # A canonical GSTR-2B workbook (written by gstr2b_adapter.py -- see docs/GSTR2B_CANONICAL_SPEC.md)
+        # is recognised by its META sheet's schema_version, before any shape rule below.
+        if "META" in sn and "B2B" in sn and "MAPPING_REPORT" in sn:
+            try:
+                import gstr2b_adapter
+                if gstr2b_adapter.is_canonical_file(f):
+                    gstr2b_files.append(f); continue
+            except ImportError:
+                pass
         if "ITC Available" in sn and "B2B" in sn:
+            gstr2b_files.append(f); continue
+        # GSTR-2B with the 'Read me' sheet missing (and possibly 'ITC Available' too),
+        # any B2BA/CDNRA combination: decided by the form title, not by sheet names.
+        # Only files WITHOUT 'Read me' are considered here -- a 2A / Table 8A file always
+        # has one, and those are still routed by their own checks further down.
+        if ("Read me" not in sn and ("B2B" in sn or "B2B-CDNR" in sn)
+                and _looks_like_gstr2b_by_title(f)):
             gstr2b_files.append(f); continue
         if "b2b, sez, de" in sn and "b2b, sez, de_inv" not in sn:
             einv_files.append(f); continue
@@ -656,6 +803,13 @@ def classify_folder(folder="."):
         g1_gstin, g1_name = _read_me_gstin_and_name(gstr1_files[0])
         self_gstin = self_gstin or g1_gstin
         company_name = g1_name
+    # Third source, for when the GSTR-1 'Read me' is missing (or unreadable) AND there are no
+    # e-way bill files to infer the GSTIN from: the taxpayer's own GSTR-3B sheets state both
+    # GSTIN and Legal name in-sheet. Only ever fills what is still empty -- never overrides.
+    if (not self_gstin or not company_name) and gstr3b_files:
+        g3_gstin, g3_name = _gstr3b_gstin_and_name(gstr3b_files[0])
+        self_gstin = self_gstin or g3_gstin
+        company_name = company_name or g3_name
 
     gstr1_month_map, w1 = _build_month_file_map(gstr1_files, _gstr1_months, "GSTR-1")
     gstr3b_month_map, w2 = _build_month_file_map(gstr3b_files, _gstr3b_months, "GSTR-3B")

@@ -277,6 +277,20 @@ def process_full_scrutiny(files, bs_pl_data, work_dir):
     import contextlib
     import io
 
+    # Fresh parser caches for every run. The parsers key their caches by (relative) path and the
+    # module stays loaded between runs in the same tab, so without this a second run would silently
+    # reuse the PREVIOUS run's parsed GSTR-2B / HSN data for a different file at the same path.
+    try:
+        import gst_parsers_returns as _pr
+        for _cache in ("_2B_FILE_CACHE", "_HSN_ALL_MONTHS_CACHE"):
+            getattr(_pr, _cache, {}).clear()
+        import gstr2b_adapter as _ad
+        _ad.clear_cache()
+        import gstr3b_adapter as _ad3
+        _ad3.clear_cache()
+    except ImportError:
+        pass
+
     os.makedirs(work_dir, exist_ok=True)
     for name, data in files:
         with open(os.path.join(work_dir, name), "wb") as f:
@@ -305,11 +319,32 @@ def process_full_scrutiny(files, bs_pl_data, work_dir):
     try:
         with contextlib.redirect_stdout(log_buf):
             outfile = master_build.main(".")
-        return {
+        result = {
             "output_name": outfile,
             "output_bytes": _read_bytes(outfile),
             "log": log_buf.getvalue(),
         }
+        # Canonical layers (docs/GSTR2B_CANONICAL_SPEC.md, docs/GSTR3B_CANONICAL_SPEC.md): hand back every
+        # converted file and the warnings/errors found while converting, so the page can show and offer them.
+        cdir = os.path.join(work_dir, "_canonical")
+        result["canonical_files"], result["canonical_issues"] = [], []
+        if os.path.isdir(cdir):
+            for name in sorted(n for n in os.listdir(cdir) if n.endswith(".xlsx")):
+                cpath = os.path.join(cdir, name)
+                result["canonical_files"].append({"name": name, "bytes": _read_bytes(cpath)})
+                try:
+                    if name.startswith("Canonical_GSTR3B_"):
+                        import gstr3b_adapter as _ca
+                        source = "GSTR-3B"
+                    else:
+                        import gstr2b_adapter as _ca
+                        source = "GSTR-2B"
+                    result["canonical_issues"] += [
+                        {"source": source, "id": i["id"], "severity": i["severity"], "message": i["message"]}
+                        for i in _ca.read_canonical(cpath)["issues"] if i["severity"] in ("ERROR", "WARNING")]
+                except Exception:  # noqa: BLE001 - notes are a nicety, never fail the run over them
+                    pass
+        return result
     finally:
         os.chdir(prev_cwd)
 

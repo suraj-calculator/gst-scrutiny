@@ -463,6 +463,9 @@ def parse_gstr3b(path, month):
     """Pull Table 3.1 and Table 4 values from GSTR-3B for ONE month, out of
     the merged workbook (one sheet per month). The sheet is located by its
     OWN in-sheet 'Year'/'Tax Period' content, not by its sheet name."""
+    if mpu.use_canonical_3b(path):
+        import gstr3b_adapter
+        return gstr3b_adapter.parse_gstr3b(path, month)
     wb=load_xlsx(path)
     ws = None
     months_found = []
@@ -1752,8 +1755,27 @@ def _load_2b_file_data(path):
     itc_rows = list(wb["ITC Available"].iter_rows(values_only=True)) if "ITC Available" in wb.sheetnames else None
 
     # ---------- amendment indices (whole-file, not month-scoped -- bug report §7) ----------
-    superseded_inv, b2ba_by_month = _read_b2ba_amendments(wb)
-    superseded_note, cdnra_by_month = _read_cdnra_amendments(wb)
+    # DEGRADE, don't discard: the amendment sheets (B2BA / B2B-CDNRA) only ADJUST the base
+    # B2B / B2B-CDNR rows. If their header text can't be located (confirmed real: a merged
+    # 2B whose B2BA sheet had lost its whole header block because the first period's B2BA was
+    # empty, and whose column layout also differs from other portal exports, so guessing
+    # columns by position would silently read the wrong ones), raising here used to throw
+    # away the ENTIRE 2B -- every month then reported 'GSTR-2B not supplied'. Instead: skip
+    # only the amendment overlay, say so loudly (log line + `amendment_warnings` on every
+    # parse_2b_excel() result), and keep using B2B / B2B-CDNR.
+    amendment_warnings = []
+    try:
+        superseded_inv, b2ba_by_month = _read_b2ba_amendments(wb)
+    except mpu.PeriodParseError as e:
+        superseded_inv, b2ba_by_month = set(), {}
+        amendment_warnings.append(f"B2BA amendments NOT applied to GSTR-2B ({os.path.basename(path)}): {e}")
+    try:
+        superseded_note, cdnra_by_month = _read_cdnra_amendments(wb)
+    except mpu.PeriodParseError as e:
+        superseded_note, cdnra_by_month = set(), {}
+        amendment_warnings.append(f"B2B-CDNRA amendments NOT applied to GSTR-2B ({os.path.basename(path)}): {e}")
+    for w in amendment_warnings:
+        print(f"[warn] {w} Amended invoices/notes in this file are therefore taken as-is from B2B / B2B-CDNR.")
 
     b2b_all_rows, b2b_cols = None, None
     if "B2B" in wb.sheetnames:
@@ -1773,9 +1795,54 @@ def _load_2b_file_data(path):
         superseded_note=superseded_note, cdnra_by_month=cdnra_by_month,
         b2b_all_rows=b2b_all_rows, b2b_cols=b2b_cols,
         cdnr_all_rows=cdnr_all_rows, cdnr_cols=cdnr_cols,
+        amendment_warnings=amendment_warnings,
     )
     _2B_FILE_CACHE[path] = data
     return data
+
+
+def _use_canonical_2b(path):
+    """True when GSTR-2B should go through the canonical layer: the switch in gst_config (or the
+    GST_2B_CANONICAL env var) is on, or `path` already IS a canonical 2B workbook."""
+    env = os.environ.get("GST_2B_CANONICAL")
+    if env is not None:
+        on = env.strip() == "1"
+    else:
+        try:
+            import gst_config
+            on = bool(getattr(gst_config, "GSTR2B_USE_CANONICAL", False))
+        except ImportError:
+            on = False
+    if on:
+        return True
+    try:
+        import gstr2b_adapter
+        return gstr2b_adapter.is_canonical_file(path)
+    except ImportError:
+        return False
+
+
+def _2b_rows_for_month(all_rows, month):
+    """Every row physically sitting under a marker block for `month`. Normally that is one
+    block; when the same period was downloaded in parts (portal 1,000-row cap) there are
+    several, and all are used. A row that is byte-identical to a row in an EARLIER block of
+    the same month is skipped -- that is the same download merged twice, not a new invoice --
+    while identical rows inside ONE block are kept (they are the file's own content)."""
+    blocks = mpu.find_blocks_for_month(all_rows, month)
+    if len(blocks) == 1:
+        s, e = blocks[0]
+        return all_rows[s:e]
+    out, seen = [], set()
+    for s, e in blocks:
+        keys = []
+        for r in all_rows[s:e]:
+            k = tuple(r)
+            if k in seen:
+                continue
+            out.append(r)
+            keys.append(k)
+        seen.update(keys)
+    return out
 
 
 def parse_2b_excel(path, month):
@@ -1792,6 +1859,9 @@ def parse_2b_excel(path, month):
     The expensive, month-independent parsing (one load_workbook(), one scan
     each of every 2B sheet) happens once per file in _load_2b_file_data();
     this function just does the cheap per-month lookup against that cache."""
+    if _use_canonical_2b(path):
+        import gstr2b_adapter
+        return gstr2b_adapter.parse_month(path, month)
     d = _load_2b_file_data(path)
 
     # ---------- Summary (Table 3), quarter-block-scoped ----------
@@ -1842,8 +1912,7 @@ def parse_2b_excel(path, month):
     b2b = []
     if d["b2b_cols"] is not None:
         c = d["b2b_cols"]
-        blk_start, blk_end = mpu.find_block_for_month(d["b2b_all_rows"], month)
-        for r in d["b2b_all_rows"][blk_start:blk_end]:
+        for r in _2b_rows_for_month(d["b2b_all_rows"], month):
             if not any(r) or not r[0] or mpu.is_marker_row(r):
                 continue
             shift = _2b_row_rate_shift(r, c["period"], c["rate"])
@@ -1895,8 +1964,7 @@ def parse_2b_excel(path, month):
     cdnr_skipped = 0
     if d["cdnr_cols"] is not None:
         c = d["cdnr_cols"]
-        blk_start, blk_end = mpu.find_block_for_month(d["cdnr_all_rows"], month)
-        for r in d["cdnr_all_rows"][blk_start:blk_end]:
+        for r in _2b_rows_for_month(d["cdnr_all_rows"], month):
             if not any(r) or not r[0] or mpu.is_marker_row(r):
                 continue
             shift = _2b_row_rate_shift(r, c["period"], c["rate"])
@@ -1945,7 +2013,8 @@ def parse_2b_excel(path, month):
     # branch above sets it to False and must not be clobbered back to True here).
     summary.setdefault("available", True)
     summary["cdnr_skipped_unparseable_this_month"] = cdnr_skipped
-    return dict(summary=summary, b2b=b2b, cdnr=cdnr, available=True)
+    return dict(summary=summary, b2b=b2b, cdnr=cdnr, available=True,
+                amendment_warnings=d.get("amendment_warnings", []))
 
 
 _ZERO_SUMMARY_KEYS = (

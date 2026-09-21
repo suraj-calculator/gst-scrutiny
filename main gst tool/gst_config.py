@@ -30,3 +30,14 @@ ITC_ROLLFORWARD_MOM_THRESHOLD = 2.0
 # interest adjustment) is statistically meaningless -- skip flagging a
 # month/column where BOTH the prior and current value are below this floor.
 ITC_ROLLFORWARD_MOM_FLOOR = 1000.0
+
+# GSTR-2B conversion layer (spec: docs/GSTR2B_CANONICAL_SPEC.md). False = the original direct
+# reader (unchanged). True = raw 2B -> canonical workbook (gstr2b_adapter.py) -> engine. A canonical
+# file supplied as input is always read through the adapter regardless of this switch. Env override
+# for tests: GST_2B_CANONICAL=1 / 0.
+GSTR2B_USE_CANONICAL = True
+
+# GSTR-3B conversion layer (spec: docs/GSTR3B_CANONICAL_SPEC.md). False = the original direct readers
+# (unchanged). True = raw 3B -> canonical workbook (gstr3b_adapter.py) -> engine. A canonical file
+# supplied as input is always read through the adapter. Env override: GST_3B_CANONICAL=1 / 0.
+GSTR3B_USE_CANONICAL = True

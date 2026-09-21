@@ -650,7 +650,7 @@ def write_irn_late_annual(ws, hsn_findings, einv_month_map=None, months_covered=
 
         all_invnos = set(irn_by_invno) | set(ewb_by_docno)
         table1, table2 = [], []
-        for key in all_invnos:
+        for key in sorted(all_invnos):   # sorted: a set's order varies with the hash seed, making both tables' row order change run to run
             irn_info = irn_by_invno.get(key)
             ewb_info = ewb_by_docno.get(key)
             irndate = irn_info.get("irndate") if irn_info else None
@@ -2438,6 +2438,13 @@ def main(folder="."):
             "workbooks and no merged GSTR-1 'Read me' sheet found). Stopping -- "
             "every output filename/header depends on this being correct."
         )
+    try:
+        import gstr2b_adapter
+        gstr2b_adapter.set_context(gstin=res.get("self_gstin"))
+        import gstr3b_adapter
+        gstr3b_adapter.set_context(gstin=res.get("self_gstin"))
+    except ImportError:
+        pass
     if not res["gstr1_month_map"] or not res["gstr3b_month_map"]:
         raise RuntimeError(
             "No merged GSTR-1 and/or GSTR-3B workbook found in the folder -- these are the only "

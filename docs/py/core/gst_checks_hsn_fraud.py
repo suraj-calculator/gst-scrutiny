@@ -106,9 +106,36 @@ class Finding:
         self.numbers = numbers or {}
 
 
-MONTH_ORDER = ["Apr-22", "May-22", "Jun-22", "Jul-22", "Aug-22", "Sep-22",
-               "Oct-22", "Nov-22", "Dec-22", "Jan-23", "Feb-23", "Mar-23"]
-MONTH_IDX = {m: i for i, m in enumerate(MONTH_ORDER)}
+# Month ordering. This used to be a hard-coded FY 2022-23 list (MONTH_ORDER / MONTH_IDX), so for ANY
+# other financial year every month label was "unknown" (index 99), every "sorted by month" in this file
+# silently fell back to arbitrary set/dict order, and results changed from one run to the next.
+# _month_key() is a real chronological serial that works for any year(s) -- the same idea master_build.py
+# already uses (_month_sort_key). Unparseable labels sort LAST, exactly like the old fallback of 99.
+_MONTH_NUM = {v: k for k, v in mpu.CAL_MONTH_ABBR.items()}
+_UNKNOWN_MONTH = 10 ** 9
+
+
+def _month_key(label):
+    """'Apr-24' -> year*12 + month (monotonic across FYs); anything unparseable -> _UNKNOWN_MONTH."""
+    m = re.match(r"^([A-Za-z]{3})-(\d{2})$", str(label or ""))
+    mm = _MONTH_NUM.get(m.group(1).title()) if m else None
+    return (2000 + int(m.group(2))) * 12 + mm if mm else _UNKNOWN_MONTH
+
+
+def _month_gap(later, earlier):
+    """Whole months from `earlier` to `later`; 0 if either label is unparseable (as the old code did)."""
+    a, b = _month_key(later), _month_key(earlier)
+    return 0 if _UNKNOWN_MONTH in (a, b) else a - b
+
+
+def _fy_of_month(label):
+    """'Apr-24' / 'Jan-25' -> '2024-25' (Indian FY, Apr-Mar); None if unparseable."""
+    k = _month_key(label)
+    if k == _UNKNOWN_MONTH:
+        return None
+    year, mon = (k - 1) // 12, (k - 1) % 12 + 1
+    start = year if mon >= 4 else year - 1
+    return f"{start}-{str(start + 1)[2:]}"
 
 
 # ======================================================================
@@ -329,9 +356,12 @@ STATE_NAME_TO_CODE = {
 # Fixed-date national holidays only (Republic Day / Independence Day / Gandhi
 # Jayanti never move) -- lunar/regional festival holidays are NOT included
 # since they'd need an external calendar; #37 will under-count, not over-count.
-NATIONAL_HOLIDAYS_FY2223 = {
-    _dt.date(2022, 8, 15), _dt.date(2022, 10, 2), _dt.date(2023, 1, 26),
-}
+_NATIONAL_HOLIDAYS_MD = {(1, 26), (8, 15), (10, 2)}   # (month, day): Republic Day, Independence Day, Gandhi Jayanti
+
+
+def _is_national_holiday(d):
+    """True on 26-Jan, 15-Aug, 2-Oct of ANY year (this used to list only the three dates of FY 2022-23)."""
+    return (d.month, d.day) in _NATIONAL_HOLIDAYS_MD
 
 GSTR3B_DUE_DOM = 20   # monthly (non-QRMP) GSTR-3B due date -- confirmed not-QRMP
 
@@ -501,7 +531,7 @@ def check_hsn_master_validity(hsn_by_month, override_path=None):
                          master["reason"] or "HSN/SAC master not available this run.")]
     F = []
     checked = flagged = 0
-    for m in sorted(hsn_by_month, key=lambda x: MONTH_IDX.get(x, 99)):
+    for m in sorted(hsn_by_month, key=lambda x: _month_key(x)):
         for row in hsn_by_month[m]:
             hsn, desc = row["hsn"], row["desc"]
             if not hsn or hsn.isalpha():
@@ -737,6 +767,9 @@ def _gstr3b_month_fields(gstr3b_path, month):
     """Pull the handful of GSTR-3B fields these checks need for one month,
     reading the sheet's own content-based Year/Tax-Period key rows (never
     the sheet name), matching the convention documented for this file."""
+    if mpu.use_canonical_3b(gstr3b_path):
+        import gstr3b_adapter
+        return gstr3b_adapter.month_fields(gstr3b_path, month)
     wb = openpyxl.load_workbook(gstr3b_path, data_only=True)
     for sn in wb.sheetnames:
         ws = wb[sn]
@@ -801,7 +834,7 @@ def check_hsn_rate_master(hsn_by_month):
     (Rule 46 -- turnover confirmed >5cr for FY2022-23 per BO Profile, so a
     6-digit HSN is mandatory; taxpayer is on 4-digit for two real codes)."""
     F = []
-    for m in sorted(hsn_by_month, key=lambda x: MONTH_IDX.get(x, 99)):
+    for m in sorted(hsn_by_month, key=lambda x: _month_key(x)):
         for row in hsn_by_month[m]:
             hsn, rate = row["hsn"], row["rate"]
             # A6 -- digit-length / Rule 46
@@ -885,7 +918,7 @@ def check_hsn_rate_master_extended(hsn_by_month):
                          "codes are unaffected either way).")]
     GST_2_0_EFFECTIVE = _dt.date(2025, 9, 22)
     checked = 0
-    for m in sorted(hsn_by_month, key=lambda x: MONTH_IDX.get(x, 99)):
+    for m in sorted(hsn_by_month, key=lambda x: _month_key(x)):
         on_date = _month_label_to_date(m)
         for row in hsn_by_month[m]:
             hsn, rate = row["hsn"], row["rate"]
@@ -943,7 +976,7 @@ def check_hsn_multi_rate(hsn_by_month):
     month (excluding the merchant-export concessional rate, which legitimately
     coexists with the standard rate for the same product)."""
     F = []
-    for m in sorted(hsn_by_month, key=lambda x: MONTH_IDX.get(x, 99)):
+    for m in sorted(hsn_by_month, key=lambda x: _month_key(x)):
         by_hsn = {}
         for row in hsn_by_month[m]:
             by_hsn.setdefault(row["hsn"], set()).add(row["rate"])
@@ -983,7 +1016,7 @@ def check_pos_tax_head(g1_lines_by_month, self_gstin):
     bug during testing against the real file before shipping this check."""
     F = []
     self_state = gstin_state(self_gstin)
-    for m in sorted(g1_lines_by_month, key=lambda x: MONTH_IDX.get(x, 99)):
+    for m in sorted(g1_lines_by_month, key=lambda x: _month_key(x)):
         for inv in g1_lines_by_month[m]:
             if inv["sheet"] != "b2b, sez, de_inv" or not inv["invno"]:
                 continue   # skip multi-rate continuation rows (no invno/POS of their own)
@@ -1024,7 +1057,7 @@ def check_b2c_large_ewb(b2cl_by_month, ewb_out_rows):
     for e in ewb_out_rows:
         if e["docno"]:
             ewb_by_invno.setdefault(e["docno"], []).append(e)
-    for m in sorted(b2cl_by_month, key=lambda x: MONTH_IDX.get(x, 99)):
+    for m in sorted(b2cl_by_month, key=lambda x: _month_key(x)):
         for inv in b2cl_by_month[m]:
             if inv["invno"] not in ewb_by_invno:
                 F.append(Finding("B2", "Inter-state B2C-Large invoice with no matching EWB", FLAG,
@@ -1045,7 +1078,7 @@ def check_sez_misclassification(g1_lines_by_month):
     F = []
     sez_types = {"SEZWP", "SEZWOP", "SEWP", "SEWOP", "DE"}
     found_any = False
-    for m in sorted(g1_lines_by_month, key=lambda x: MONTH_IDX.get(x, 99)):
+    for m in sorted(g1_lines_by_month, key=lambda x: _month_key(x)):
         for inv in g1_lines_by_month[m]:
             if inv["sheet"] != "b2b, sez, de_inv":
                 continue
@@ -1074,7 +1107,7 @@ def check_branch_transfer(g1_lines_by_month, self_gstin):
     """C2 -- same PAN, different state = stock transfer, not a real sale."""
     F = []
     self_pan = gstin_pan(self_gstin)
-    for m in sorted(g1_lines_by_month, key=lambda x: MONTH_IDX.get(x, 99)):
+    for m in sorted(g1_lines_by_month, key=lambda x: _month_key(x)):
         for inv in g1_lines_by_month[m]:
             if inv["sheet"] != "b2b, sez, de_inv" or not inv["invno"]:
                 continue
@@ -1119,7 +1152,7 @@ def check_intra_vs_ewb_interstate(g1_lines_by_month, ewb_out_rows, self_gstin):
     for e in ewb_out_rows:
         if e["docno"]:
             ewb_by_invno.setdefault(e["docno"], []).append(e)
-    for m in sorted(g1_lines_by_month, key=lambda x: MONTH_IDX.get(x, 99)):
+    for m in sorted(g1_lines_by_month, key=lambda x: _month_key(x)):
         for inv in g1_lines_by_month[m]:
             if inv["sheet"] != "b2b, sez, de_inv" or not inv["invno"]:
                 continue
@@ -1163,7 +1196,7 @@ def check_round_numbers(g1_lines_by_month, ewb_out_rows=None):
     for e in (ewb_out_rows or []):
         if e.get("docno"):
             ewb_by_invno.setdefault(e["docno"], []).append(e)
-    for m in sorted(g1_lines_by_month, key=lambda x: MONTH_IDX.get(x, 99)):
+    for m in sorted(g1_lines_by_month, key=lambda x: _month_key(x)):
         for inv in g1_lines_by_month[m]:
             if inv["sheet"] != "b2b, sez, de_inv" or not inv["invno"]:
                 continue
@@ -1199,7 +1232,7 @@ def check_below_ewb_threshold(g1_lines_by_month, ewb_out_rows, self_gstin):
     F = []
     self_state = gstin_state(self_gstin)
     ewb_invnos = {e["docno"] for e in ewb_out_rows if e["docno"]}
-    for m in sorted(g1_lines_by_month, key=lambda x: MONTH_IDX.get(x, 99)):
+    for m in sorted(g1_lines_by_month, key=lambda x: _month_key(x)):
         for inv in g1_lines_by_month[m]:
             if inv["sheet"] != "b2b, sez, de_inv" or not inv["invno"]:
                 continue
@@ -1248,17 +1281,17 @@ def check_cn_timing(cdnr_by_month, g1_lines_by_month):
     by recipient GSTIN only (not a specific invoice) -- always labelled as such."""
     F = []
     first_invoice_month = {}
-    for m in sorted(g1_lines_by_month, key=lambda x: MONTH_IDX.get(x, 99)):
+    for m in sorted(g1_lines_by_month, key=lambda x: _month_key(x)):
         for inv in g1_lines_by_month[m]:
             if inv["sheet"] != "b2b, sez, de_inv":
                 continue
             first_invoice_month.setdefault(inv["gstin"], m)
-    for m in sorted(cdnr_by_month, key=lambda x: MONTH_IDX.get(x, 99)):
+    for m in sorted(cdnr_by_month, key=lambda x: _month_key(x)):
         for cn in cdnr_by_month[m]:
             first_m = first_invoice_month.get(cn["gstin"])
             if not first_m:
                 continue
-            gap = MONTH_IDX.get(m, 0) - MONTH_IDX.get(first_m, 0)
+            gap = _month_gap(m, first_m)
             if gap >= 5:
                 F.append(Finding("#4", "Credit note issued long after recipient's earliest invoice", REVW,
                     f"CN {cn['noteno']} to {cn['gstin']} issued in {m}; this recipient's earliest "
@@ -1277,7 +1310,7 @@ def check_hsn_drift(hsn_by_month):
     """#6 -- HSN product mix shifting materially month to month.
     #27 -- brand-new HSN appearing for the first time, especially late in FY."""
     F = []
-    months_sorted = sorted(hsn_by_month, key=lambda x: MONTH_IDX.get(x, 99))
+    months_sorted = sorted(hsn_by_month, key=lambda x: _month_key(x))
     seen_hsns = set()
     monthly_mix = {}
     for m in months_sorted:
@@ -1301,7 +1334,7 @@ def check_hsn_drift(hsn_by_month):
         mix, total = monthly_mix[m]
         if total > 0 and prev:
             pmix, ptotal = prev
-            for hsn in set(mix) | set(pmix):
+            for hsn in sorted(set(mix) | set(pmix)):   # sorted: set order varies with the hash seed
                 share_now = mix.get(hsn, 0.0) / total * 100
                 share_prev = (pmix.get(hsn, 0.0) / ptotal * 100) if ptotal else 0.0
                 if abs(share_now - share_prev) >= 30:
@@ -1356,7 +1389,7 @@ def check_year_end_dumping(g1_lines_by_month):
             if inv["sheet"] != "b2b, sez, de_inv" or not inv["invdate"]:
                 continue
             total += inv["taxable"]
-            if inv["invdate"].year == 2023 and inv["invdate"].month == 3 and inv["invdate"].day >= 17:
+            if inv["invdate"].month == 3 and inv["invdate"].day >= 17:   # last 15 days of March, any FY end
                 last15 += inv["taxable"]
     if total > 0:
         pct = last15 / total * 100
@@ -1379,7 +1412,7 @@ def check_zero_cash_months(cash_monthly):
     if total_months and len(zero_months) >= total_months * 0.5:
         F.append(Finding("#9", "Zero cash tax paid in majority of months", REVW,
             f"Zero cash-ledger debit (no cash tax paid, fully ITC-settled) in {len(zero_months)} of "
-            f"{total_months} months with ledger activity: {', '.join(sorted(zero_months, key=lambda x: MONTH_IDX.get(x,99)))}. "
+            f"{total_months} months with ledger activity: {', '.join(sorted(zero_months, key=lambda x: _month_key(x)))}. "
             f"Entirely ITC-funded liability isn't inherently wrong for an ITC-heavy business, but "
             f"verify against the ITC's own genuineness (2B match rate).",
             numbers=dict(zero_months=len(zero_months), total_months=total_months)))
@@ -1437,7 +1470,7 @@ def check_cn_vs_inward_ewb(cdnr_by_month, ewb_in_rows):
     ewb_in_by_gstin = {}
     for e in ewb_in_rows:
         ewb_in_by_gstin.setdefault(e["from_gstin"], []).append(e)
-    for m in sorted(cdnr_by_month, key=lambda x: MONTH_IDX.get(x, 99)):
+    for m in sorted(cdnr_by_month, key=lambda x: _month_key(x)):
         for cn in cdnr_by_month[m]:
             note_value = cn["taxable"] + cn["igst"] + cn["cgst"] + cn["sgst"]
             candidates = ewb_in_by_gstin.get(cn["gstin"], [])
@@ -1460,28 +1493,40 @@ def check_cn_vs_inward_ewb(cdnr_by_month, ewb_in_rows):
 
 def check_cross_fy_shift(g1_lines_by_month, ewb_out_rows):
     """#12 -- invoice dated 31-Mar but its matched EWB generated 1-Apr (or
-    later, next FY)."""
+    later, next FY). Tested for EVERY financial-year end (each March) present in the supplied
+    months -- it used to be hard-wired to March 2023, so for any other year it could never find
+    anything and reported PASS regardless of the data."""
     F = []
+    title = "Invoice dated 31-Mar, EWB generated in the next FY"
     ewb_by_invno = {}
     for e in ewb_out_rows:
         if e["docno"]:
             ewb_by_invno.setdefault(e["docno"], []).append(e)
-    mar23 = g1_lines_by_month.get("Mar-23", [])
-    for inv in mar23:
-        if inv["sheet"] != "b2b, sez, de_inv" or not inv["invdate"]:
-            continue
-        if inv["invdate"] != _dt.date(2023, 3, 31):
-            continue
-        for e in ewb_by_invno.get(inv["invno"], []):
-            if e["ewbdate"] and e["ewbdate"] >= _dt.date(2023, 4, 1):
-                F.append(Finding("#12", "Invoice dated 31-Mar, EWB generated in the next FY", FLAG,
-                    f"Invoice {inv['invno']} dated 31-Mar-2023, but EWB {e['ewbno']} generated on "
-                    f"{e['ewbdate']}. Cross-FY turnover-shifting risk -- verify actual supply date "
-                    f"and AS-9/Ind AS 115 revenue recognition.",
-                    numbers=dict(invno=inv["invno"], ewbdate=str(e["ewbdate"]))))
+    marches = sorted((m for m in g1_lines_by_month if m.startswith("Mar-") and _month_key(m) != _UNKNOWN_MONTH),
+                     key=_month_key)
+    if not marches:
+        return [Finding("#12", title, INFO,
+            "No March month in the supplied data, so there is no financial-year end to test.")]
+    for mlabel in marches:
+        year = 2000 + int(mlabel[-2:])
+        ye, ns = _dt.date(year, 3, 31), _dt.date(year, 4, 1)
+        for inv in g1_lines_by_month.get(mlabel, []):
+            if inv["sheet"] != "b2b, sez, de_inv" or not inv["invdate"]:
+                continue
+            if inv["invdate"] != ye:
+                continue
+            for e in ewb_by_invno.get(inv["invno"], []):
+                if e["ewbdate"] and e["ewbdate"] >= ns:
+                    F.append(Finding("#12", title, FLAG,
+                        f"Invoice {inv['invno']} dated 31-Mar-{year}, but EWB {e['ewbno']} generated on "
+                        f"{e['ewbdate']}. Cross-FY turnover-shifting risk -- verify actual supply date "
+                        f"and AS-9/Ind AS 115 revenue recognition.",
+                        numbers=dict(invno=inv["invno"], ewbdate=str(e["ewbdate"]))))
     if not F:
-        F.append(Finding("#12", "Invoice dated 31-Mar, EWB generated in the next FY", PASS,
-            "No 31-Mar-2023 invoice has a matched EWB dated 1-Apr-2023 or later."))
+        years = [2000 + int(m[-2:]) for m in marches]
+        F.append(Finding("#12", title, PASS,
+            f"No {' / '.join(f'31-Mar-{y}' for y in years)} invoice has a matched EWB dated "
+            f"{' / '.join(f'1-Apr-{y}' for y in years)} or later."))
     return F
 
 
@@ -1525,7 +1570,7 @@ def check_credit_hoarding(credit_monthly, cash_monthly):
     # approximate closing credit balance = opening (0 baseline) + cumulative net
     running = 0.0
     peak = 0.0
-    for m in sorted(credit_monthly, key=lambda x: MONTH_IDX.get(x, 99)):
+    for m in sorted(credit_monthly, key=lambda x: _month_key(x)):
         running += credit_monthly[m].get("net", 0.0)
         peak = max(peak, running)
     if peak > 0 and total_cash_paid > 0 and peak >= total_cash_paid * 2:
@@ -1620,14 +1665,14 @@ def check_ewb_state_shift(ewb_out_rows):
         st = gstin_state(e["to_gstin"])
         monthly_state_mix.setdefault(e["month"], {}).setdefault(st, 0.0)
         monthly_state_mix[e["month"]][st] += e["assess"]
-    months_sorted = sorted(monthly_state_mix, key=lambda x: MONTH_IDX.get(x, 99))
+    months_sorted = sorted(monthly_state_mix, key=lambda x: _month_key(x))
     prev = None
     for m in months_sorted:
         mix = monthly_state_mix[m]
         total = sum(mix.values())
         if prev and total > 0:
             pmix, ptotal = prev
-            for st in set(mix) | set(pmix):
+            for st in sorted(set(mix) | set(pmix)):   # sorted: set order varies with the hash seed
                 now_share = mix.get(st, 0.0) / total * 100
                 prev_share = (pmix.get(st, 0.0) / ptotal * 100) if ptotal else 0.0
                 if abs(now_share - prev_share) >= 40:
@@ -1646,30 +1691,38 @@ def check_ewb_state_shift(ewb_out_rows):
 
 def check_exempt_turnover_rule42(bo, gstr3b_monthly_fields):
     """#25 -- exempt turnover (Turnover - Taxable Turnover, from BO Profile
-    Financial Information) vs Rule 42/43 reversal actually posted in 3B."""
-    F = []
+    Financial Information) vs Rule 42/43 reversal actually posted in 3B. Runs for each financial
+    year present in the 3B months (it used to read only the BO row for FY 2022-23, whatever
+    year was being scrutinised)."""
+    T = "Exempt turnover vs Rule 42 ITC reversal"
     if not bo:
-        return [Finding("#25", "Exempt turnover vs Rule 42 ITC reversal", INFO, "BO Profile not supplied.")]
-    fin = bo.get("financial_by_fy", {}).get("2022-23")
-    if not fin or fin.get("turnover") is None or fin.get("taxable_turnover") is None:
-        return [Finding("#25", "Exempt turnover vs Rule 42 ITC reversal", INFO,
-            "FY2022-23 row not found/incomplete in BO Profile Financial Information.")]
-    exempt = fin["turnover"] - fin["taxable_turnover"]
-    exempt_pct = (exempt / fin["turnover"] * 100) if fin["turnover"] else 0.0
-    zero_reversal_months = [m for m, f in gstr3b_monthly_fields.items()
-                             if f and f["itc_reversed_rule42_43"] == 0]
-    if exempt_pct >= 1 and zero_reversal_months:
-        F.append(Finding("#25", "Exempt turnover present but Rule 42 reversal is zero in some months", REVW,
-            f"BO Profile FY2022-23: Turnover Rs.{fin['turnover']:.2f}L vs Taxable Turnover "
-            f"Rs.{fin['taxable_turnover']:.2f}L implies exempt turnover ~{exempt_pct:.1f}%. Rule 42/43 "
-            f"ITC reversal (4B1) is exactly Rs.0 in {len(zero_reversal_months)} month(s): "
-            f"{', '.join(sorted(zero_reversal_months, key=lambda x: MONTH_IDX.get(x,99)))}. "
-            f"If exempt supplies genuinely occurred in those months, a proportionate reversal is "
-            f"mandatory -- verify.", numbers=dict(exempt_pct=exempt_pct, zero_months=len(zero_reversal_months))))
-    else:
-        F.append(Finding("#25", "Exempt turnover vs Rule 42 ITC reversal", PASS,
-            f"BO Profile implies exempt turnover ~{exempt_pct:.1f}% of FY2022-23 turnover -- "
-            f"immaterial or reversal is being posted; no finding."))
+        return [Finding("#25", T, INFO, "BO Profile not supplied.")]
+    fys = sorted({_fy_of_month(m) for m in gstr3b_monthly_fields if _fy_of_month(m)})
+    if not fys:
+        return [Finding("#25", T, INFO, "No GSTR-3B months with a readable period to test.")]
+    F = []
+    for fy in fys:
+        fin = bo.get("financial_by_fy", {}).get(fy)
+        if not fin or fin.get("turnover") is None or fin.get("taxable_turnover") is None:
+            F.append(Finding("#25", T, INFO,
+                f"FY{fy} row not found/incomplete in BO Profile Financial Information."))
+            continue
+        exempt = fin["turnover"] - fin["taxable_turnover"]
+        exempt_pct = (exempt / fin["turnover"] * 100) if fin["turnover"] else 0.0
+        zero_reversal_months = [m for m, f in gstr3b_monthly_fields.items()
+                                if _fy_of_month(m) == fy and f and f["itc_reversed_rule42_43"] == 0]
+        if exempt_pct >= 1 and zero_reversal_months:
+            F.append(Finding("#25", "Exempt turnover present but Rule 42 reversal is zero in some months", REVW,
+                f"BO Profile FY{fy}: Turnover Rs.{fin['turnover']:.2f}L vs Taxable Turnover "
+                f"Rs.{fin['taxable_turnover']:.2f}L implies exempt turnover ~{exempt_pct:.1f}%. Rule 42/43 "
+                f"ITC reversal (4B1) is exactly Rs.0 in {len(zero_reversal_months)} month(s): "
+                f"{', '.join(sorted(zero_reversal_months, key=_month_key))}. "
+                f"If exempt supplies genuinely occurred in those months, a proportionate reversal is "
+                f"mandatory -- verify.", numbers=dict(exempt_pct=exempt_pct, zero_months=len(zero_reversal_months))))
+        else:
+            F.append(Finding("#25", T, PASS,
+                f"BO Profile implies exempt turnover ~{exempt_pct:.1f}% of FY{fy} turnover -- "
+                f"immaterial or reversal is being posted; no finding."))
     return F
 
 
@@ -1679,7 +1732,7 @@ def check_sunday_holiday_ewb(ewb_out_rows, ewb_in_rows):
     all_ewb = [e for e in (ewb_out_rows + ewb_in_rows) if e.get("ewbdate")]
     if not all_ewb:
         return [Finding("#37", "Sunday/national-holiday EWB generation share", INFO, "No dated EWB rows found.")]
-    flagged = [e for e in all_ewb if e["ewbdate"].weekday() == 6 or e["ewbdate"] in NATIONAL_HOLIDAYS_FY2223]
+    flagged = [e for e in all_ewb if e["ewbdate"].weekday() == 6 or _is_national_holiday(e["ewbdate"])]
     pct = len(flagged) / len(all_ewb) * 100
     sev = FLAG if pct >= 30 else (REVW if pct >= 15 else PASS)
     return [Finding("#37", "Sunday/national-holiday EWB generation share", sev,
@@ -1918,7 +1971,7 @@ def check_rate_outliers(g1_lines_by_month):
     """#57 -- invoices whose rate is a statistical outlier vs that month's
     dominant rate (e.g. 1% of invoices at 18% while 99% sit at 12%)."""
     F = []
-    for m in sorted(g1_lines_by_month, key=lambda x: MONTH_IDX.get(x, 99)):
+    for m in sorted(g1_lines_by_month, key=lambda x: _month_key(x)):
         rates = [inv["rate"] for inv in g1_lines_by_month[m]
                  if inv["sheet"] == "b2b, sez, de_inv" and inv["rate"] > 0]
         if len(rates) < 10:
