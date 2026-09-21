@@ -970,5 +970,9 @@ document.getElementById("run-btn").addEventListener("click", async function () {
 });
 
 // ---------------------------------------------------------------------
-updateRunbar();
-initRuntime();
+function startApp() {
+  updateRunbar();
+  initRuntime();
+}
+
+document.addEventListener("auth:ok", startApp, { once: true });
