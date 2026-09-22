@@ -23,20 +23,20 @@ const UPLOAD_SECTIONS = [
   { id: "ewb_outward", step: 2, title: "Outward E-Way Bill", required: false, py: { kind: "ewb", direction: "outward" },
     desc: "EWB MIS Report exports from the outward E-Way Bill portal folder.",
     accept: "EWB_MIS_Report_Excel (N).xls" },
-  { id: "einv", step: 3, title: "E-Invoice", required: false, py: { kind: "merge", mergeKind: "einv" },
+  { id: "einv", step: 3, title: "E-Invoice", required: false, py: { kind: "merge", mergeKind: "einv" }, canonicalSource: "einv",
     desc: "Monthly E-Invoice exports, any number of periods.",
     accept: "per-period E-Invoice .xlsx" },
-  { id: "gstr1", step: 4, title: "GSTR-1", required: true, py: { kind: "merge", mergeKind: "gstr1" },
+  { id: "gstr1", step: 4, title: "GSTR-1", required: true, py: { kind: "merge", mergeKind: "gstr1" }, canonicalSource: "gstr1",
     desc: "Monthly or quarterly GSTR-1 exports for the financial year.",
     accept: "per-period GSTR-1 .xlsx" },
   { id: "gstr2a", step: 5, title: "GSTR-2A", required: false, py: { kind: "merge", mergeKind: "gstr2a" },
     desc: "Monthly GSTR-2A exports for the financial year.",
     accept: "per-period GSTR-2A .xlsx",
     note: "Not yet exercised against real GSTR-2A data in this build — the code path is identical to the other return types, just unverified. Report an issue if it misbehaves." },
-  { id: "gstr2b", step: 6, title: "GSTR-2B", required: false, py: { kind: "gstr2b" },
+  { id: "gstr2b", step: 6, title: "GSTR-2B", required: false, py: { kind: "gstr2b" }, canonicalSource: "gstr2b",
     desc: "Monthly GSTR-2B exports — every workbook is aligned to the same set of worksheets before merging.",
     accept: "per-period GSTR-2B .xlsx" },
-  { id: "gstr3b", step: 7, title: "GSTR-3B", required: true, py: { kind: "gstr3b" },
+  { id: "gstr3b", step: 7, title: "GSTR-3B", required: true, py: { kind: "gstr3b" }, canonicalSource: "gstr3b",
     desc: "GSTR3B_&lt;GSTIN&gt;_&lt;MMYYYY&gt;.zip bundles straight from the portal (or already-extracted .xlsx files).",
     accept: ".zip bundles or .xlsx" },
 ];
@@ -265,6 +265,9 @@ async function callGstr3b(filePairs, onStarted) {
 async function callGstr2b(filePairs, onStarted) {
   return await callWorker("gstr2b", { filePairs }, { onStarted });
 }
+async function callCanonicalPreview(source, name, data, onStarted) {
+  return await callWorker("canonical_preview", { source, name, data }, { onStarted });
+}
 async function callFullScrutiny(filePairs, bsPlData, onStarted) {
   return await callWorker("full_scrutiny", { filePairs, bsPlData }, { onStarted, timeoutMs: FULL_SCRUTINY_TIMEOUT_MS });
 }
@@ -476,6 +479,43 @@ function showError(cfg, message, detail) {
   markUndone(cfg.id);
 }
 
+// The per-step "converted to canonical format" block shown right under a merge result — the
+// same idea as the final results screen's canonical-file cards (see renderScrutinyResult),
+// just one step earlier and for one source instead of all of them.
+function renderCanonicalBlock(canon) {
+  if (!canon) return "";
+  if (!canon.ok) {
+    return `
+    <div class="result-line warn">
+      ${ICONS.warn}
+      <p>Could not convert to the canonical format: ${escapeHtml(canon.error)}<br>
+         <span class="fmeta">The merged file above is unaffected and will still be used; this only means the extra check could not run right now.</span></p>
+    </div>`;
+  }
+  const kb = (canon.canonical_bytes.length / 1024).toFixed(0);
+  const issues = canon.issues || [];
+  const hasIssues = canon.status !== "OK";
+  const okLine = hasIssues
+    ? `${ICONS.warn} <p>Converted to the canonical format &mdash; ${issues.length} issue${issues.length === 1 ? "" : "s"} found (see below).</p>`
+    : `${ICONS.check} <p>Converted to the canonical format &mdash; no issues found.</p>`;
+  return `
+    <div class="result-line${hasIssues ? " warn" : ""}">${okLine}</div>
+    <div class="download-row">
+      <div>
+        <div class="fname">${escapeHtml(canon.canonical_name)}</div>
+        <div class="fmeta">${kb} KB &middot; every value traceable to its source row; mapping report and issues inside</div>
+      </div>
+      <div class="download-btns">
+        <button class="btn small ghost" type="button" data-action="download-canon">Download canonical file</button>
+      </div>
+    </div>
+    ${issues.length ? `
+    <details class="run-log">
+      <summary>Conversion notes (${issues.length})</summary>
+      <pre>${escapeHtml(issues.map(i => `[${i.severity}] ${i.id}: ${i.message}`).join("\n\n"))}</pre>
+    </details>` : ""}`;
+}
+
 function showResult(cfg, r, extraLine) {
   if (!r) {
     showError(cfg, `No ${cfg.title}-shaped files were detected among what you uploaded. Double-check these are the right export type.`);
@@ -492,13 +532,16 @@ function showResult(cfg, r, extraLine) {
     <div class="result-actions">
       <button class="btn small ghost" type="button" data-action="download">Download merged file</button>
       <button class="btn small danger" type="button" data-action="clear">Clear</button>
-    </div>`;
+    </div>
+    ${renderCanonicalBlock(r.canonical)}`;
   workbench[cfg.id] = r;
   // r.output_bytes/r.output_name are closed over here rather than re-read
   // from workbench[cfg.id] on click, so a later Clear (which deletes that
   // key) can never turn this button into a dead click.
   resultBox.querySelector('[data-action="download"]').addEventListener("click", () => downloadBytes(r.output_bytes, r.output_name));
   resultBox.querySelector('[data-action="clear"]').addEventListener("click", () => clearUploadSection(cfg));
+  const canonBtn = resultBox.querySelector('[data-action="download-canon"]');
+  if (canonBtn) canonBtn.addEventListener("click", () => downloadBytes(r.canonical.canonical_bytes, r.canonical.canonical_name));
   markDone(cfg.id);
 }
 
@@ -550,6 +593,19 @@ async function processSection(cfg, filePairs) {
       result = await callGstr2b(filePairs, onStarted);
     } else if (cfg.py.kind === "gstr3b") {
       result = await callGstr3b(filePairs, onStarted);
+    }
+    // Convert right away, so a mapping problem in THIS file shows up now, not only at the end
+    // of a full run — a separate, additive call: it never changes the merged file itself, and a
+    // failure here is shown alongside the merge result rather than failing the upload step.
+    if (result && cfg.canonicalSource) {
+      progWrap.innerHTML = `<div class="progress-wrap"><div class="progress-track"><div class="progress-fill" data-fill></div></div><div class="progress-label">Converting to the fixed canonical format…</div></div>`;
+      requestAnimationFrame(() => { const f = progWrap.querySelector("[data-fill]"); if (f) f.style.width = "100%"; });
+      try {
+        result.canonical = await callCanonicalPreview(cfg.canonicalSource, result.output_name, result.output_bytes, () => {});
+      } catch (err) {
+        console.error(err);
+        result.canonical = { ok: false, error: String((err && err.message) || err) };
+      }
     }
     progWrap.innerHTML = "";
     showResult(cfg, result, extraLine);

@@ -137,6 +137,13 @@ result
 `, { _files: filePairs, _kind: kind, _work_dir: `/work/merge_${kind}_${++_callSeq}` });
 }
 
+async function callCanonicalPreview(source, name, data) {
+  return await runPy(`
+result = web_adapters.process_canonical_preview(_source, _name, bytes(_data), _work_dir)
+result
+`, { _source: source, _name: name, _data: data, _work_dir: `/work/canon_${source}_${++_callSeq}` });
+}
+
 async function callGstr3b(filePairs) {
   return await runPy(`
 files = [(n, bytes(d)) for n, d in _files]
@@ -200,6 +207,7 @@ async function handleCall(msg) {
     let result;
     if (msg.adapter === "ewb") result = await callEwb(msg.args.direction, msg.args.filePairs);
     else if (msg.adapter === "merge") result = await callMerge(msg.args.mergeKind, msg.args.filePairs);
+    else if (msg.adapter === "canonical_preview") result = await callCanonicalPreview(msg.args.source, msg.args.name, msg.args.data);
     else if (msg.adapter === "gstr2b") result = await callGstr2b(msg.args.filePairs);
     else if (msg.adapter === "gstr3b") result = await callGstr3b(msg.args.filePairs);
     else if (msg.adapter === "full_scrutiny") result = await callFullScrutiny(msg.args.filePairs, msg.args.bsPlData);

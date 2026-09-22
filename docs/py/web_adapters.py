@@ -235,6 +235,60 @@ def process_gstr2b(files, work_dir):
     return process_merge("gstr2b", aligned, os.path.join(work_dir, "merge"))
 
 
+# merge kind -> (canonical-layer module, plain-language label). Only the 4 sources that have a
+# canonical converter so far; GSTR-2A does not (see docs/GSTRxx_CANONICAL_SPEC.md files).
+CANONICAL_ADAPTERS = {
+    "gstr1": ("gstr1_adapter", "GSTR-1"),
+    "gstr2b": ("gstr2b_adapter", "GSTR-2B"),
+    "gstr3b": ("gstr3b_adapter", "GSTR-3B"),
+    "einv": ("einv_adapter", "E-Invoice"),
+}
+
+
+def process_canonical_preview(source, name, data, work_dir):
+    """
+    Converts ONE already-merged workbook (the output of process_merge / process_gstr2b /
+    process_gstr3b) to its canonical form right away, so the upload step itself can show
+    "converted OK" / the exact issues, instead of only finding out at the end of a full run.
+
+    source: one of CANONICAL_ADAPTERS' keys ("gstr1", "gstr2b", "gstr3b", "einv").
+    name, data: the merged file's own name and bytes (what process_merge/... returned).
+    work_dir: an empty folder to do the work in (caller creates/cleans it).
+
+    This is a PREVIEW, purely additive: it does NOT change what process_full_scrutiny is
+    given (still the raw merged file, converted again there exactly as before) or anything in
+    the canonical-layer code itself. It costs a few extra seconds of conversion at upload time
+    in exchange for surfacing a mapping problem right away instead of at the end of a full run.
+
+    Returns {"ok": True, "status": "OK"|"OK_WITH_WARNINGS"|"OK_WITH_ERRORS", "source_label": str,
+             "canonical_name": str, "canonical_bytes": bytes,
+             "issues": [{"id","severity","message"}, ...]}   (issues: ERROR/WARNING only)
+    or {"ok": False, "source_label": str, "error": str} if the file cannot be converted at all
+    (not really a file of that type, a required column missing, ...) -- never raises.
+    """
+    if source not in CANONICAL_ADAPTERS:
+        raise ValueError(f"no canonical layer for {source!r}")
+    module_name, label = CANONICAL_ADAPTERS[source]
+    adapter = importlib.import_module(module_name)
+
+    os.makedirs(work_dir, exist_ok=True)
+    src_path = os.path.join(work_dir, name)
+    with open(src_path, "wb") as f:
+        f.write(data)
+
+    try:
+        canon_data = adapter.build_canonical(src_path)
+    except Exception as e:  # noqa: BLE001 - a plain message either way, never a crash mid-upload
+        return {"ok": False, "source_label": label, "error": str(e)}
+
+    out_path = adapter.write_canonical(canon_data, os.path.join(work_dir, "_canonical"))
+    issues = [{"id": i["id"], "severity": i["severity"], "message": i["message"]}
+              for i in canon_data["issues"] if i["severity"] in ("ERROR", "WARNING")]
+    status = dict(canon_data["meta"]).get("status", "OK")
+    return {"ok": True, "status": status, "source_label": label, "canonical_name": os.path.basename(out_path),
+            "canonical_bytes": _read_bytes(out_path), "issues": issues}
+
+
 def _render_bs_pl_module(bs_pl_data):
     """
     master_build.py does a plain `import bs_pl_input` and reads its
