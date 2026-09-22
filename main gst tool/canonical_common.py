@@ -26,6 +26,7 @@ import re
 
 import openpyxl
 from openpyxl import Workbook
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
@@ -117,6 +118,21 @@ class IssueLog:
 # ----------------------------------------------------------------------------------------
 # writing
 # ----------------------------------------------------------------------------------------
+def _safe_cell(v):
+    """A value that can be written to Excel without surprises: control characters that make openpyxl
+    refuse the cell are dropped (text starting with '=' is forced to stay text in table_sheet)."""
+    if isinstance(v, str):
+        v = ILLEGAL_CHARACTERS_RE.sub("", v)
+    return v
+
+
+class CanonicalLayoutError(Exception):
+    """A canonical table cannot be used because the source layout lacks something the engine cannot do
+    without (e.g. GSTR-1's b2b tax columns). Deliberately NOT a PeriodParseError: the engine catches
+    PeriodParseError as 'this month is missing from this sheet' and carries on, whereas a layout problem
+    must stop that month loudly, with the message."""
+
+
 def table_sheet(wb, title, cols, rows, max_width=40):
     """One data sheet: styled header row, one row per dict, columns in `cols` order."""
     ws = wb.create_sheet(title)
@@ -125,7 +141,12 @@ def table_sheet(wb, title, cols, rows, max_width=40):
         c.fill, c.font = HDR_FILL, HDR_FONT
         c.alignment = Alignment(vertical="center")
     for r in rows:
-        ws.append([r.get(c) for c in cols])
+        values = [_safe_cell(r.get(c)) for c in cols]
+        ws.append(values)
+        if any(isinstance(v, str) and v.startswith("=") for v in values):
+            for cell in ws[ws.max_row]:           # keep such text as text, not a formula
+                if isinstance(cell.value, str) and cell.value.startswith("="):
+                    cell.data_type = "s"
     ws.freeze_panes = "A2"
     for i, c in enumerate(cols, 1):
         ws.column_dimensions[get_column_letter(i)].width = max(10, min(max_width, len(c) + 4))

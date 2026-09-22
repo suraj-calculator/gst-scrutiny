@@ -856,6 +856,9 @@ def gstr1_arn_dates_by_month(gstr1_path):
     that sheet's own 'Tax Period' field (if present) identifies -- otherwise
     returns it under a special '_readme_fallback' key with a clear note,
     rather than guessing which month it belongs to."""
+    if mpu.use_canonical_1(gstr1_path):
+        import gstr1_adapter
+        return gstr1_adapter.arn_dates_by_month(gstr1_path)
     out = {}
     warnings = []
     wb = openpyxl.load_workbook(gstr1_path, data_only=True)

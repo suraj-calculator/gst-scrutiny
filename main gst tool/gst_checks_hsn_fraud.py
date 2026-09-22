@@ -672,6 +672,9 @@ def _cdnr_rows_by_month(gstr1_path):
     continuation rows of this shape, previously dropped from checks #4/#11 entirely rather
     than being attributed to their real note. Fixed the same way: forward-fill the last-seen
     gstin/noteno/notedate/notetype within each month's block."""
+    if mpu.use_canonical_1(gstr1_path):
+        import gstr1_adapter
+        return gstr1_adapter.cdnr_rows_by_month(gstr1_path)
     wb = openpyxl.load_workbook(gstr1_path, data_only=True)
     if "cdnr" not in wb.sheetnames:
         return {}
@@ -716,6 +719,9 @@ def _b2cl_rows_by_month(gstr1_path):
     """BUG FIX -- same root cause as the b2b/cdnr fixes: multi-rate B2C-large invoices leave
     Invoice Number/date/value/POS blank on continuation rows. Confirmed on real data (e.g. a
     3-rate-line invoice under GSTIN-less B2CL rows 145-147). Forward-filled the same way."""
+    if mpu.use_canonical_1(gstr1_path):
+        import gstr1_adapter
+        return gstr1_adapter.b2cl_rows_by_month(gstr1_path)
     wb = openpyxl.load_workbook(gstr1_path, data_only=True)
     if "b2cl" not in wb.sheetnames:
         return {}

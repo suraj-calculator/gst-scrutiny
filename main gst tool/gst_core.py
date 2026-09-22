@@ -357,6 +357,28 @@ def _looks_like_r2a_merged(path):
     return False
 
 
+def use_canonical_1(path):
+    """True when GSTR-1 should be read through the canonical layer (gstr1_adapter.py): the switch
+    gst_config.GSTR1_USE_CANONICAL (or env GST_1_CANONICAL=1/0) is on, or `path` already IS a canonical
+    GSTR-1 workbook."""
+    env = os.environ.get("GST_1_CANONICAL")
+    if env is not None:
+        on = env.strip() == "1"
+    else:
+        try:
+            import gst_config
+            on = bool(getattr(gst_config, "GSTR1_USE_CANONICAL", False))
+        except ImportError:
+            on = False
+    if on:
+        return True
+    try:
+        import gstr1_adapter
+        return gstr1_adapter.is_canonical_file(path)
+    except ImportError:
+        return False
+
+
 def use_canonical_3b(path):
     """True when GSTR-3B should be read through the canonical layer (gstr3b_adapter.py): the switch
     gst_config.GSTR3B_USE_CANONICAL (or env GST_3B_CANONICAL=1/0) is on, or `path` already IS a
@@ -375,6 +397,28 @@ def use_canonical_3b(path):
     try:
         import gstr3b_adapter
         return gstr3b_adapter.is_canonical_file(path)
+    except ImportError:
+        return False
+
+
+def use_canonical_einv(path):
+    """True when the E-Invoice should be read through the canonical layer (einv_adapter.py): the switch
+    gst_config.EINV_USE_CANONICAL (or env GST_EINV_CANONICAL=1/0) is on, or `path` already IS a canonical
+    E-Invoice workbook."""
+    env = os.environ.get("GST_EINV_CANONICAL")
+    if env is not None:
+        on = env.strip() == "1"
+    else:
+        try:
+            import gst_config
+            on = bool(getattr(gst_config, "EINV_USE_CANONICAL", False))
+        except ImportError:
+            on = False
+    if on:
+        return True
+    try:
+        import einv_adapter
+        return einv_adapter.is_canonical_file(path)
     except ImportError:
         return False
 
@@ -402,6 +446,13 @@ def _looks_like_gstr3b_merged(path):
 
 
 def _gstr1_months(path):
+    if use_canonical_1(path):
+        import gstr1_adapter
+        return gstr1_adapter.months(path)
+    return _gstr1_months_raw(path)
+
+
+def _gstr1_months_raw(path):
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
         ws = wb["b2b, sez, de_inv"]
@@ -412,6 +463,13 @@ def _gstr1_months(path):
 
 
 def _einv_months(path):
+    if use_canonical_einv(path):
+        import einv_adapter
+        return einv_adapter.months(path)
+    return _einv_months_raw(path)
+
+
+def _einv_months_raw(path):
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
         ws = wb["b2b, sez, de"]
@@ -529,6 +587,13 @@ def _csv_first_line(path):
 
 
 def _read_me_gstin_and_name(gstr1_path):
+    if use_canonical_1(gstr1_path):
+        import gstr1_adapter
+        return gstr1_adapter.gstin_and_name(gstr1_path)
+    return _read_me_gstin_and_name_raw(gstr1_path)
+
+
+def _read_me_gstin_and_name_raw(gstr1_path):
     """Content-based GSTIN + Legal Name from the merged GSTR-1's 'Read me' sheet."""
     wb = openpyxl.load_workbook(gstr1_path, read_only=True, data_only=True)
     try:
@@ -649,7 +714,17 @@ def classify_folder(folder="."):
         sn = set(_sheetnames(f))
         if not sn:
             continue
-        if "b2b, sez, de_inv" in sn and "hsn" in sn:
+        # A canonical GSTR-1 workbook (META + RETURNS + COVERAGE, see gstr1_adapter.py) is recognised first.
+        if "META" in sn and "COVERAGE" in sn and "RETURNS" in sn:
+            try:
+                import gstr1_adapter
+                if gstr1_adapter.is_canonical_file(f):
+                    gstr1_files.append(f); continue
+            except ImportError:
+                pass
+        # Table 12 (HSN) is the single 'hsn' tab in older exports and 'hsn(b2b)' + 'hsn(b2c)' in newer ones
+        # (the same file can even mix both): any of them makes this a GSTR-1.
+        if "b2b, sez, de_inv" in sn and ("hsn" in sn or "hsn(b2b)" in sn or "hsn(b2c)" in sn):
             gstr1_files.append(f); continue
         # A canonical GSTR-2B workbook (written by gstr2b_adapter.py -- see docs/GSTR2B_CANONICAL_SPEC.md)
         # is recognised by its META sheet's schema_version, before any shape rule below.
@@ -669,6 +744,14 @@ def classify_folder(folder="."):
         if ("Read me" not in sn and ("B2B" in sn or "B2B-CDNR" in sn)
                 and _looks_like_gstr2b_by_title(f)):
             gstr2b_files.append(f); continue
+        # A canonical E-Invoice workbook (written by einv_adapter.py -- docs/EINV_CANONICAL_SPEC.md).
+        if "META" in sn and "EINV_B2B" in sn and "MAPPING_REPORT" in sn:
+            try:
+                import einv_adapter
+                if einv_adapter.is_canonical_file(f):
+                    einv_files.append(f); continue
+            except ImportError:
+                pass
         if "b2b, sez, de" in sn and "b2b, sez, de_inv" not in sn:
             einv_files.append(f); continue
         if "Comparison Summary" in sn:
@@ -811,6 +894,12 @@ def classify_folder(folder="."):
         self_gstin = self_gstin or g3_gstin
         company_name = company_name or g3_name
 
+    # The E-Invoice download states no GSTIN of its own, so its canonical file is named from the taxpayer's.
+    try:
+        import einv_adapter
+        einv_adapter.set_context(gstin=self_gstin)
+    except ImportError:
+        pass
     gstr1_month_map, w1 = _build_month_file_map(gstr1_files, _gstr1_months, "GSTR-1")
     gstr3b_month_map, w2 = _build_month_file_map(gstr3b_files, _gstr3b_months, "GSTR-3B")
     einv_month_map, w3 = _build_month_file_map(einv_files, _einv_months, "E-Invoice")

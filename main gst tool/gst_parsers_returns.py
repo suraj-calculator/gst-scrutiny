@@ -152,6 +152,9 @@ def read_gstr1_hsn_all_months(path):
                                   source_tab), ...]}. A month genuinely absent from the returned
     dict means NEITHER format had a marker for it anywhere in the file -- callers must treat
     that as an explicit gap, never silently as a zero total."""
+    if mpu.use_canonical_1(path):
+        import gstr1_adapter
+        return gstr1_adapter.read_gstr1_hsn_all_months(path)
     if path in _HSN_ALL_MONTHS_CACHE:
         return _HSN_ALL_MONTHS_CACHE[path]
     wb = openpyxl.load_workbook(path, data_only=True)
@@ -223,6 +226,9 @@ def parse_gstr1(path, month):
     it raises if that month has no marker at all in a given sub-sheet (that
     sub-sheet is simply skipped for scoring only when the SHEET itself is
     entirely absent from the workbook, not when the month is missing from it)."""
+    if mpu.use_canonical_1(path):
+        import gstr1_adapter
+        return gstr1_adapter.parse_gstr1(path, month)
     wb = load_xlsx(path)
     out = {"taxable":0.0,"IGST":0.0,"CGST":0.0,"SGST":0.0,"CESS":0.0,
            "b2b_count":0,"b2b_no_irn":0,"lines":{},"blank_invno_lines":0,"blank_invno_taxable":0.0,"named_taxable":0.0,"named_IGST":0.0,"named_CGST":0.0,"named_SGST":0.0,
@@ -575,6 +581,9 @@ def parse_einv(path, month):
     (available=False) -- callers already branch on this explicitly, so it is
     not hidden, just not a hard stop for what is a documented PARTIAL source."""
     import os
+    if path and os.path.exists(path) and mpu.use_canonical_einv(path):
+        import einv_adapter
+        return einv_adapter.parse_einv(path, month)
     out={"taxable":0.0,"IGST":0.0,"CGST":0.0,"SGST":0.0,"CESS":0.0,"count":0,"errors":0,"available":True,"lines":{},
          "cancel_col_found":False,"cancel_date_col_found":False,"cancelled":[]}
     if not path or not os.path.exists(path):
@@ -2372,6 +2381,9 @@ def parse_b2ba(path, month):
     first of which used to carry the invoice identity). This feeds both the B2 comparison's
     amendment-aware splicing AND the Rectification Pairs sheet, so an unfixed continuation row
     here would understate a revised invoice's value in both places. Forward-filled the same way."""
+    if mpu.use_canonical_1(path):
+        import gstr1_adapter
+        return gstr1_adapter.parse_b2ba(path, month)
     wb = openpyxl.load_workbook(path, data_only=True)
     if "b2ba" not in wb.sheetnames:
         return []
@@ -2417,6 +2429,9 @@ def parse_cdnra(path, month):
     scoped to ONE month's block out of the merged workbook.
     BUG FIX -- same root cause as parse_b2ba() above; confirmed on real data (e.g. note
     VOU24A000545 amended with both an 18% and a 28% line). Forward-filled the same way."""
+    if mpu.use_canonical_1(path):
+        import gstr1_adapter
+        return gstr1_adapter.parse_cdnra(path, month)
     wb = openpyxl.load_workbook(path, data_only=True)
     if "cdnra" not in wb.sheetnames:
         return []
@@ -2457,6 +2472,9 @@ def parse_cdnra(path, month):
 def parse_docs(path, month):
     """Table 13: Summary of Documents Issued, scoped to ONE month's block out
     of the merged workbook. Returns list of dicts for gap analysis against B2B."""
+    if mpu.use_canonical_1(path):
+        import gstr1_adapter
+        return gstr1_adapter.parse_docs(path, month)
     wb = openpyxl.load_workbook(path, data_only=True)
     if "docs" not in wb.sheetnames:
         return []

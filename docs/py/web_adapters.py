@@ -288,6 +288,10 @@ def process_full_scrutiny(files, bs_pl_data, work_dir):
         _ad.clear_cache()
         import gstr3b_adapter as _ad3
         _ad3.clear_cache()
+        import gstr1_adapter as _ad1
+        _ad1.clear_cache()
+        import einv_adapter as _ade
+        _ade.clear_cache()
     except ImportError:
         pass
 
@@ -336,6 +340,12 @@ def process_full_scrutiny(files, bs_pl_data, work_dir):
                     if name.startswith("Canonical_GSTR3B_"):
                         import gstr3b_adapter as _ca
                         source = "GSTR-3B"
+                    elif name.startswith("Canonical_GSTR1_"):
+                        import gstr1_adapter as _ca
+                        source = "GSTR-1"
+                    elif name.startswith("Canonical_EINV_"):
+                        import einv_adapter as _ca
+                        source = "E-Invoice"
                     else:
                         import gstr2b_adapter as _ca
                         source = "GSTR-2B"

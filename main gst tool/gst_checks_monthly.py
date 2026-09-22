@@ -142,6 +142,9 @@ def read_gstr1_lines(path, month):
     gst_report.py and master_build.py). Fixed the same way: forward-fill the last-seen
     gstin/invno/invdate/pos/rcm within each month's block, reset per sheet (a cdnr
     continuation row must never inherit identity left over from the b2b sheet)."""
+    if mpu.use_canonical_1(path):
+        import gstr1_adapter
+        return gstr1_adapter.read_gstr1_lines(path, month)
     wb = _open(path)
     out = []
     for sn, kind in (("b2b, sez, de_inv", "INV"), ("cdnr", "CN"), ("cdnur", "CN")):
@@ -186,6 +189,9 @@ def read_gstr1_lines(path, month):
 def read_einv_lines(path, month):
     if not path or not os.path.exists(path):
         return []   # E-Invoice legitimately not supplied at all -- graceful
+    if mpu.use_canonical_einv(path):
+        import einv_adapter
+        return einv_adapter.read_einv_lines(path, month)
     wb = _open(path)
     out = []
     rows, H = _sheet_rows(wb, "b2b, sez, de")
@@ -910,6 +916,9 @@ def read_gstr1_invoices(path, month):
     d[""] bucket instead of accumulating into their real parent invoice's totals -- silently
     losing that portion of the invoice's taxable/tax value from this function's output.
     Fixed the same way: forward-fill the last-seen invoice identity within this month."""
+    if mpu.use_canonical_1(path):
+        import gstr1_adapter
+        return gstr1_adapter.read_gstr1_invoices(path, month)
     wb = openpyxl.load_workbook(path, data_only=True)
     ws = wb["b2b, sez, de_inv"]; rows = list(ws.iter_rows(values_only=True))
     H = {h: i for i, h in enumerate([str(c).strip() if c else "" for c in rows[3]])}
@@ -944,6 +953,9 @@ def read_einv_invoices(path, month):
     out = {}
     if not path or not os.path.exists(path):
         return out   # E-Invoice legitimately not supplied at all -- graceful
+    if mpu.use_canonical_einv(path):
+        import einv_adapter
+        return einv_adapter.read_einv_invoices(path, month)
     wb = openpyxl.load_workbook(path, data_only=True)
     if "b2b, sez, de" not in wb.sheetnames:
         return out

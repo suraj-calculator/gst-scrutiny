@@ -1,0 +1,201 @@
+{
+  "_about": "GSTR-1 canonical layer - which raw tab feeds which canonical table, and what each canonical field is called in the raw tab (spec: docs/GSTR1_CANONICAL_SPEC.md). Every GSTR-1 tab has the same shape: a title, ONE heading row, then a period-banner row per month with that month's data under it; the heading row is the non-empty row just above the first banner. Headings are compared after lower-casing and stripping every non-alphanumeric character. 'exact' = accepted spellings (first is the canonical one, the rest are aliases); 'contains' = a fragment of the heading; 'type': 'num' = converted to a number (blank cell = 0), 'raw' = kept exactly as in the source (text, dates, identifiers); 'required': true = ERROR if the column cannot be found (the table is then unusable). To support a renamed portal heading add its spelling to the right field's 'exact' list.",
+  "version": "1",
+  "tables": {
+    "b2b": {
+      "canon_sheet": "B2B_LINES", "raw_names": ["b2b, sez, de_inv"],
+      "fields": {
+        "gstin":    {"exact": ["GSTIN/UIN of Recipient", "GSTIN/UIN", "Recipient GSTIN"], "type": "raw"},
+        "receiver": {"exact": ["Receiver Name"], "type": "raw"},
+        "invno":    {"exact": ["Invoice Number", "Invoice/Advance Receipt Number"], "type": "raw"},
+        "invdate":  {"exact": ["Invoice date"], "type": "raw"},
+        "invval":   {"exact": ["Invoice Value"], "type": "num"},
+        "pos":      {"exact": ["Place Of Supply"], "type": "raw"},
+        "rcm":      {"exact": ["Reverse Charge"], "type": "raw"},
+        "invtype":  {"exact": ["Invoice Type"], "type": "raw"},
+        "rate":     {"exact": ["Rate", "Rate (%)"], "type": "num"},
+        "taxable":  {"exact": ["Taxable Value"], "type": "num", "required": true},
+        "igst":     {"exact": ["Integrated Tax"], "type": "num", "required": true},
+        "cgst":     {"exact": ["Central Tax"], "type": "num", "required": true},
+        "sgst":     {"exact": ["State/UT Tax"], "type": "num", "required": true},
+        "cess":     {"exact": ["Cess Amount"], "type": "num", "required": true},
+        "source":   {"exact": ["Source"], "type": "raw"},
+        "irn":      {"exact": ["IRN"], "type": "raw"},
+        "irndate":  {"exact": ["IRN date", "Ack Date", "Acknowledgement Date"], "type": "raw"}
+      }
+    },
+    "b2cl": {
+      "canon_sheet": "B2CL_LINES", "raw_names": ["b2cl"],
+      "fields": {
+        "invno":   {"exact": ["Invoice Number"], "type": "raw"},
+        "invdate": {"exact": ["Invoice date"], "type": "raw"},
+        "invval":  {"exact": ["Invoice Value"], "type": "num"},
+        "pos":     {"exact": ["Place Of Supply"], "type": "raw"},
+        "rate":    {"exact": ["Rate"], "type": "num"},
+        "taxable": {"exact": ["Taxable Value"], "type": "num"},
+        "igst":    {"exact": ["Integrated Tax"], "type": "num"},
+        "cgst":    {"exact": ["Central Tax"], "type": "num", "absent_ok": true},
+        "sgst":    {"exact": ["State/UT Tax"], "type": "num", "absent_ok": true},
+        "cess":    {"exact": ["Cess Amount"], "type": "num"}
+      }
+    },
+    "exp": {
+      "canon_sheet": "EXP_LINES", "raw_names": ["exp"],
+      "fields": {
+        "exptype":  {"exact": ["Export Type"], "type": "raw"},
+        "invno":    {"exact": ["Invoice Number"], "type": "raw"},
+        "invdate":  {"exact": ["Invoice date"], "type": "raw"},
+        "invval":   {"exact": ["Invoice Value"], "type": "num"},
+        "portcode": {"exact": ["Port Code"], "type": "raw"},
+        "sbno":     {"exact": ["Shipping Bill Number"], "type": "raw"},
+        "sbdate":   {"exact": ["Shipping Bill Date"], "type": "raw"},
+        "taxable":  {"exact": ["Taxable Value"], "type": "num"},
+        "rate":     {"exact": ["Rate"], "type": "num"},
+        "igst":     {"exact": ["Integrated Tax"], "type": "num"},
+        "cess":     {"exact": ["Cess Amount"], "type": "num"},
+        "source":   {"exact": ["Source"], "type": "raw"},
+        "irn":      {"exact": ["IRN"], "type": "raw"},
+        "irndate":  {"exact": ["IRN date"], "type": "raw"}
+      }
+    },
+    "b2cs": {
+      "canon_sheet": "B2CS_LINES", "raw_names": ["b2cs"],
+      "fields": {
+        "pos":     {"exact": ["Place Of Supply"], "type": "raw"},
+        "rate":    {"exact": ["Rate"], "type": "num"},
+        "taxable": {"exact": ["Taxable Value"], "type": "num"},
+        "igst":    {"exact": ["Integrated Tax"], "type": "num"},
+        "cgst":    {"exact": ["Central Tax"], "type": "num"},
+        "sgst":    {"exact": ["State/UT Tax"], "type": "num"},
+        "cess":    {"exact": ["Cess Amount"], "type": "num"}
+      }
+    },
+    "exemp": {
+      "canon_sheet": "EXEMP_LINES", "raw_names": ["exemp"],
+      "fields": {
+        "description": {"exact": ["Description"], "type": "raw"},
+        "nil":         {"exact": ["Nil Rated Supplies"], "contains": ["nilrated"], "type": "num"},
+        "exempted":    {"exact": ["Exempted (Other than Nil rated/non-GST supply)"], "contains": ["exempted"], "type": "num"},
+        "nongst":      {"exact": ["Non-GST Supplies"], "type": "num"}
+      }
+    },
+    "cdnr": {
+      "canon_sheet": "CDNR_LINES", "raw_names": ["cdnr"],
+      "fields": {
+        "gstin":            {"exact": ["GSTIN/UIN of Recipient", "GSTIN/UIN", "Recipient GSTIN"], "type": "raw"},
+        "receiver":         {"exact": ["Receiver Name"], "type": "raw"},
+        "noteno":           {"exact": ["Note Number"], "type": "raw"},
+        "notedate":         {"exact": ["Note Date"], "type": "raw"},
+        "notetype":         {"exact": ["Note Type"], "type": "raw"},
+        "pos":              {"exact": ["Place Of Supply"], "type": "raw"},
+        "rcm":              {"exact": ["Reverse Charge"], "type": "raw"},
+        "note_supply_type": {"exact": ["Note Supply Type"], "type": "raw"},
+        "noteval":          {"exact": ["Note Value"], "type": "num"},
+        "rate":             {"exact": ["Rate"], "type": "num"},
+        "taxable":          {"exact": ["Taxable Value"], "type": "num"},
+        "igst":             {"exact": ["Integrated Tax"], "type": "num"},
+        "cgst":             {"exact": ["Central Tax"], "type": "num"},
+        "sgst":             {"exact": ["State/UT Tax"], "type": "num"},
+        "cess":             {"exact": ["Cess Amount"], "type": "num"},
+        "source":           {"exact": ["Source"], "type": "raw"},
+        "irn":              {"exact": ["IRN"], "type": "raw"},
+        "irndate":          {"exact": ["IRN date", "Ack Date", "Acknowledgement Date"], "type": "raw"}
+      }
+    },
+    "cdnur": {
+      "canon_sheet": "CDNUR_LINES", "raw_names": ["cdnur"],
+      "fields": {
+        "urtype":   {"exact": ["UR Type"], "type": "raw"},
+        "noteno":   {"exact": ["Note Number"], "type": "raw"},
+        "notedate": {"exact": ["Note Date"], "type": "raw"},
+        "notetype": {"exact": ["Note Type"], "type": "raw"},
+        "pos":      {"exact": ["Place Of Supply"], "type": "raw"},
+        "noteval":  {"exact": ["Note Value"], "type": "num"},
+        "rate":     {"exact": ["Rate"], "type": "num"},
+        "taxable":  {"exact": ["Taxable Value"], "type": "num"},
+        "igst":     {"exact": ["Integrated Tax"], "type": "num"},
+        "cgst":     {"exact": ["Central Tax"], "type": "num", "absent_ok": true},
+        "sgst":     {"exact": ["State/UT Tax"], "type": "num", "absent_ok": true},
+        "cess":     {"exact": ["Cess Amount"], "type": "num"},
+        "source":   {"exact": ["Source"], "type": "raw"},
+        "irn":      {"exact": ["IRN"], "type": "raw"},
+        "irndate":  {"exact": ["IRN date", "Ack Date", "Acknowledgement Date"], "type": "raw"}
+      }
+    },
+    "b2ba": {
+      "canon_sheet": "B2BA_LINES", "raw_names": ["b2ba"],
+      "fields": {
+        "gstin":       {"exact": ["GSTIN/UIN of Recipient"], "type": "raw"},
+        "receiver":    {"exact": ["Receiver Name"], "type": "raw"},
+        "orig_invno":  {"exact": ["Original Invoice Number"], "type": "raw"},
+        "orig_invdate": {"exact": ["Original Invoice date"], "type": "raw"},
+        "rev_invno":   {"exact": ["Revised Invoice Number"], "type": "raw"},
+        "rev_invdate": {"exact": ["Revised Invoice date"], "type": "raw"},
+        "invval":      {"exact": ["Invoice Value"], "type": "num"},
+        "pos":         {"exact": ["Place Of Supply"], "type": "raw"},
+        "rcm":         {"exact": ["Reverse Charge"], "type": "raw"},
+        "invtype":     {"exact": ["Invoice Type"], "type": "raw"},
+        "rate":        {"exact": ["Rate"], "type": "num"},
+        "taxable":     {"exact": ["Taxable Value"], "type": "num"},
+        "igst":        {"exact": ["Integrated Tax"], "type": "num"},
+        "cgst":        {"exact": ["Central Tax"], "type": "num"},
+        "sgst":        {"exact": ["State/UT Tax"], "type": "num"},
+        "cess":        {"exact": ["Cess Amount"], "type": "num"}
+      }
+    },
+    "cdnra": {
+      "canon_sheet": "CDNRA_LINES", "raw_names": ["cdnra"],
+      "fields": {
+        "gstin":            {"exact": ["GSTIN/UIN of Recipient"], "type": "raw"},
+        "receiver":         {"exact": ["Receiver Name"], "type": "raw"},
+        "orig_noteno":      {"exact": ["Original Note Number"], "type": "raw"},
+        "orig_notedate":    {"exact": ["Original Note Date"], "type": "raw"},
+        "rev_noteno":       {"exact": ["Revised Note Number"], "type": "raw"},
+        "rev_notedate":     {"exact": ["Revised Note Date"], "type": "raw"},
+        "notetype":         {"exact": ["Note Type"], "type": "raw"},
+        "pos":              {"exact": ["Place Of Supply"], "type": "raw"},
+        "rcm":              {"exact": ["Reverse Charge"], "type": "raw"},
+        "note_supply_type": {"exact": ["Note Supply Type"], "type": "raw"},
+        "noteval":          {"exact": ["Note Value"], "type": "num"},
+        "rate":             {"exact": ["Rate"], "type": "num"},
+        "taxable":          {"exact": ["Taxable Value"], "type": "num"},
+        "igst":             {"exact": ["Integrated Tax"], "type": "num"},
+        "cgst":             {"exact": ["Central Tax"], "type": "num"},
+        "sgst":             {"exact": ["State/UT Tax"], "type": "num"},
+        "cess":             {"exact": ["Cess Amount"], "type": "num"}
+      }
+    },
+    "hsn": {
+      "canon_sheet": "HSN_LINES", "raw_names": ["hsn", "hsn(b2b)", "hsn(b2c)"],
+      "fields": {
+        "hsn":     {"exact": ["HSN"], "type": "raw"},
+        "desc":    {"exact": ["Description"], "type": "raw"},
+        "uqc":     {"exact": ["UQC"], "type": "raw"},
+        "qty":     {"exact": ["Total Quantity"], "type": "num"},
+        "rate":    {"exact": ["Rate"], "type": "num"},
+        "taxable": {"exact": ["Taxable Value"], "type": "num"},
+        "igst":    {"exact": ["Integrated Tax"], "type": "num"},
+        "cgst":    {"exact": ["Central Tax"], "type": "num"},
+        "sgst":    {"exact": ["State/UT Tax"], "type": "num"},
+        "cess":    {"exact": ["Cess Amount"], "type": "num"}
+      }
+    },
+    "docs": {
+      "canon_sheet": "DOCS_LINES", "raw_names": ["docs"],
+      "fields": {
+        "nature":    {"exact": ["Nature of Document"], "type": "raw"},
+        "sr_from":   {"exact": ["Sr. No. From"], "type": "raw"},
+        "sr_to":     {"exact": ["Sr. No. To"], "type": "raw"},
+        "total":     {"exact": ["Total Number"], "type": "num"},
+        "cancelled": {"exact": ["Cancelled"], "type": "num"}
+      }
+    }
+  },
+  "readme_labels": {
+    "gstin": ["gstin"],
+    "legal_name": ["legal name"],
+    "arn": ["arn", "arn no", "arn number"],
+    "arn_date": ["arn date", "date of arn"],
+    "tax_period": ["tax period"]
+  }
+}

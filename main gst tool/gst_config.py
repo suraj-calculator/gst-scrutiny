@@ -41,3 +41,13 @@ GSTR2B_USE_CANONICAL = True
 # (unchanged). True = raw 3B -> canonical workbook (gstr3b_adapter.py) -> engine. A canonical file
 # supplied as input is always read through the adapter. Env override: GST_3B_CANONICAL=1 / 0.
 GSTR3B_USE_CANONICAL = True
+
+# GSTR-1 conversion layer (spec: docs/GSTR1_CANONICAL_SPEC.md). False = the original direct readers
+# (unchanged). True = merged GSTR-1 -> canonical workbook (gstr1_adapter.py) -> engine. A canonical file
+# supplied as input is always read through the adapter. Env override: GST_1_CANONICAL=1 / 0.
+GSTR1_USE_CANONICAL = True
+
+# E-Invoice conversion layer (spec: docs/EINV_CANONICAL_SPEC.md). False = the original direct readers
+# (unchanged). True = merged E-Invoice -> canonical workbook (einv_adapter.py) -> engine. A canonical file
+# supplied as input is always read through the adapter. Env override: GST_EINV_CANONICAL=1 / 0.
+EINV_USE_CANONICAL = True

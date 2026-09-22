@@ -1,0 +1,30 @@
+{
+  "_about": "E-Invoice canonical layer - what each canonical field is called in the raw E-Invoice tab 'b2b, sez, de' (spec: docs/EINV_CANONICAL_SPEC.md). The tab has a title, ONE heading row, then a period-banner row ('Financial Year: .. | Tax Period: ..') per month with that month's invoices under it. Headings are compared after lower-casing and stripping every non-alphanumeric character. 'exact' = accepted spellings (first is the canonical one, the rest are aliases); 'contains' = a fragment of the heading; 'type': 'num' = converted to a number (blank cell = 0), 'raw' = kept exactly as in the source (text, dates, identifiers); 'required': true = the file is rejected with a plain message if the column cannot be found. To support a renamed portal heading add its spelling to the right field's 'exact' list. 'absent_ok': true = the portal download normally does not have this column, so its absence is not reported. 'cancelled_values' = status texts that mean the e-invoice was cancelled. 'cancel_date' only accepts headings that really say the invoice was cancelled on that date; the portal's 'GSTR-1 auto-population/ deletion upon cancellation date' column is filled for VALID invoices too, so it is kept separately as 'autopop_date' and never reported as a cancellation date.",
+  "version": "1",
+  "raw_names": ["b2b, sez, de"],
+  "cancelled_values": ["CANCELLED", "CANCEL", "CANCELED"],
+  "readme_labels": {"gstin": ["gstin", "gstin/uin"], "legal_name": ["legal name", "legal name of the registered person", "name of the registered person"]},
+  "fields": {
+    "gstin": {"label": "GSTIN of recipient", "exact": ["GSTIN/UIN of Recipient", "GSTIN of Recipient", "GSTIN/UIN", "Recipient GSTIN"], "type": "raw"},
+    "receiver": {"label": "Receiver name", "exact": ["Receiver Name", "Reciever Name"], "type": "raw"},
+    "invno": {"label": "Invoice number", "exact": ["Invoice Number", "Document number"], "type": "raw", "required": true},
+    "invdate": {"label": "Invoice date", "exact": ["Invoice date", "Document date"], "type": "raw"},
+    "invval": {"label": "Invoice value", "exact": ["Invoice Value"], "type": "num"},
+    "pos": {"label": "Place of supply", "exact": ["Place Of Supply"], "type": "raw"},
+    "rcm": {"label": "Reverse charge", "exact": ["Reverse Charge"], "type": "raw"},
+    "invtype": {"label": "Invoice type", "exact": ["Invoice Type"], "type": "raw"},
+    "rate": {"label": "Rate", "exact": ["Rate", "Rate (%)"], "type": "num"},
+    "taxable": {"label": "Taxable value", "exact": ["Taxable Value"], "type": "num", "required": true},
+    "igst": {"label": "Integrated tax", "exact": ["Integrated Tax"], "type": "num", "required": true},
+    "cgst": {"label": "Central tax", "exact": ["Central Tax"], "type": "num", "required": true},
+    "sgst": {"label": "State/UT tax", "exact": ["State/UT Tax"], "type": "num", "required": true},
+    "cess": {"label": "Cess amount", "exact": ["Cess Amount"], "type": "num"},
+    "irn": {"label": "IRN", "exact": ["IRN", "Irn"], "type": "raw"},
+    "irndate": {"label": "IRN date", "exact": ["IRN date", "Ack Date", "Acknowledgement Date"], "type": "raw"},
+    "status": {"label": "E-invoice status", "exact": ["IRN status", "Status", "E-invoice status", "Cancel status", "Invoice status"], "type": "raw"},
+    "cancel_date": {"label": "Cancellation date", "exact": ["Cancel date", "IRN cancel date", "Cancelled date", "Date of cancellation", "Cancellation date"], "type": "raw", "absent_ok": true},
+    "autopop_date": {"label": "GSTR-1 auto-population/deletion date", "exact": ["GSTR-1 auto-population/ deletion upon cancellation date"], "type": "raw"},
+    "autopop": {"label": "GSTR-1 auto-population status", "exact": ["GSTR-1 auto-population/ deletion status"], "type": "raw"},
+    "error": {"label": "Error in auto-population", "exact": ["Error in auto-population/ deletion", "Error", "Errors"], "type": "raw"}
+  }
+}
