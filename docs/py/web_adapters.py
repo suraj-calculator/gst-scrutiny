@@ -346,6 +346,8 @@ def process_full_scrutiny(files, bs_pl_data, work_dir):
         _ad1.clear_cache()
         import einv_adapter as _ade
         _ade.clear_cache()
+        import ewb_adapter as _adw
+        _adw.clear_cache()
     except ImportError:
         pass
 

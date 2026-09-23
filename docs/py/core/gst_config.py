@@ -51,3 +51,9 @@ GSTR1_USE_CANONICAL = True
 # (unchanged). True = merged E-Invoice -> canonical workbook (einv_adapter.py) -> engine. A canonical file
 # supplied as input is always read through the adapter. Env override: GST_EINV_CANONICAL=1 / 0.
 EINV_USE_CANONICAL = True
+
+# E-Way Bill conversion layer (spec: docs/EWB_CANONICAL_SPEC.md). False = the original direct reader
+# (unchanged). True = merged e-way bill (inward or outward) -> canonical workbook (ewb_adapter.py) ->
+# engine. A canonical file supplied as input is always read through the adapter. Env override:
+# GST_EWB_CANONICAL=1 / 0.
+EWB_USE_CANONICAL = True

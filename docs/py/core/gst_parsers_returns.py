@@ -2288,6 +2288,9 @@ def parse_annual_ewb(path):
     Fixed the same way 'EWB No. & Dt.' already was: looked up BY NAME ('Doc No. & Dt.'), split
     with the same _split_ewb_no_dt() helper -- never a positional offset from a DIFFERENT
     column."""
+    if mpu.use_canonical_ewb(path):
+        import ewb_adapter
+        return ewb_adapter.parse_annual_ewb(path)
     wb = openpyxl.load_workbook(path, data_only=True)
     ws, hdr, _ = _find_data_sheet(wb)
     if ws is None:

@@ -423,6 +423,28 @@ def use_canonical_einv(path):
         return False
 
 
+def use_canonical_ewb(path):
+    """True when an e-way bill file should be read through the canonical layer (ewb_adapter.py): the
+    switch gst_config.EWB_USE_CANONICAL (or env GST_EWB_CANONICAL=1/0) is on, or `path` already IS a
+    canonical e-way bill workbook."""
+    env = os.environ.get("GST_EWB_CANONICAL")
+    if env is not None:
+        on = env.strip() == "1"
+    else:
+        try:
+            import gst_config
+            on = bool(getattr(gst_config, "EWB_USE_CANONICAL", False))
+        except ImportError:
+            on = False
+    if on:
+        return True
+    try:
+        import ewb_adapter
+        return ewb_adapter.is_canonical_file(path)
+    except ImportError:
+        return False
+
+
 def _looks_like_gstr3b_merged(path):
     """Content signature for the merged GSTR-3B workbook: at least one sheet
     contains the literal 'Form GSTR-3B' banner text. Sheet NAMES (e.g.
@@ -814,6 +836,17 @@ def classify_folder(folder="."):
             machinery_hsn_master_files.append(f); continue
         if _looks_like_gstr3b_merged(f):
             gstr3b_files.append(f); continue
+        # A canonical e-way bill workbook (written by ewb_adapter.py -- see docs/EWB_CANONICAL_SPEC.md) is
+        # recognised by its META sheet's schema_version, before the raw header scan below -- its own
+        # EWB_ROWS sheet uses canonical field names, not the portal's own headings, so the raw scan alone
+        # would never find it and the file would be silently dropped.
+        if "META" in sn and "EWB_ROWS" in sn and "MAPPING_REPORT" in sn:
+            try:
+                import ewb_adapter
+                if ewb_adapter.is_canonical_file(f):
+                    ewb_candidates.append(f); continue
+            except ImportError:
+                pass
         # Annual EWB: has 'EWB No.' + 'From GSTIN & Name' header on some sheet
         wb = openpyxl.load_workbook(f, read_only=True, data_only=True)
         found_ewb = False
@@ -898,6 +931,16 @@ def classify_folder(folder="."):
     try:
         import einv_adapter
         einv_adapter.set_context(gstin=self_gstin)
+    except ImportError:
+        pass
+    # An e-way bill export states no GSTIN of its own either -- self_gstin is in fact DERIVED from these
+    # very files a few lines above, so a canonical e-way bill file built during that direction-detection
+    # pass (above) is unavoidably named 'UNKNOWN' (the classic chicken-and-egg: the context isn't known
+    # until after the file has already been parsed once). This call only helps a build that happens after
+    # this point.
+    try:
+        import ewb_adapter
+        ewb_adapter.set_context(gstin=self_gstin)
     except ImportError:
         pass
     gstr1_month_map, w1 = _build_month_file_map(gstr1_files, _gstr1_months, "GSTR-1")
