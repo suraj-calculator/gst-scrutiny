@@ -36,6 +36,8 @@ const PY_FILES = [
   "core/ewb_mapping.json",
   "core/gstr1_adapter.py",
   "core/gstr1_mapping.json",
+  "core/gstr2a_adapter.py",
+  "core/gstr2a_mapping.json",
   "core/gstr2b_adapter.py",
   "core/gstr2b_mapping.json",
   "core/gstr3b_adapter.py",

@@ -29,7 +29,7 @@ const UPLOAD_SECTIONS = [
   { id: "gstr1", step: 4, title: "GSTR-1", required: true, py: { kind: "merge", mergeKind: "gstr1" }, canonicalSource: "gstr1",
     desc: "Monthly or quarterly GSTR-1 exports for the financial year.",
     accept: "per-period GSTR-1 .xlsx" },
-  { id: "gstr2a", step: 5, title: "GSTR-2A", required: false, py: { kind: "merge", mergeKind: "gstr2a" },
+  { id: "gstr2a", step: 5, title: "GSTR-2A", required: false, py: { kind: "merge", mergeKind: "gstr2a" }, canonicalSource: "gstr2a",
     desc: "Monthly GSTR-2A exports for the financial year.",
     accept: "per-period GSTR-2A .xlsx",
     note: "Not yet exercised against real GSTR-2A data in this build — the code path is identical to the other return types, just unverified. Report an issue if it misbehaves." },

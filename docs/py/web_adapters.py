@@ -236,9 +236,10 @@ def process_gstr2b(files, work_dir):
 
 
 # merge kind -> (canonical-layer module, plain-language label). Only the 4 sources that have a
-# canonical converter so far; GSTR-2A does not (see docs/GSTRxx_CANONICAL_SPEC.md files).
+# canonical converter so far (see the docs/*_CANONICAL_SPEC.md files).
 CANONICAL_ADAPTERS = {
     "gstr1": ("gstr1_adapter", "GSTR-1"),
+    "gstr2a": ("gstr2a_adapter", "GSTR-2A"),
     "gstr2b": ("gstr2b_adapter", "GSTR-2B"),
     "gstr3b": ("gstr3b_adapter", "GSTR-3B"),
     "einv": ("einv_adapter", "E-Invoice"),
@@ -348,6 +349,8 @@ def process_full_scrutiny(files, bs_pl_data, work_dir):
         _ade.clear_cache()
         import ewb_adapter as _adw
         _adw.clear_cache()
+        import gstr2a_adapter as _ad2a
+        _ad2a.clear_cache()
     except ImportError:
         pass
 
@@ -402,6 +405,12 @@ def process_full_scrutiny(files, bs_pl_data, work_dir):
                     elif name.startswith("Canonical_EINV_"):
                         import einv_adapter as _ca
                         source = "E-Invoice"
+                    elif name.startswith("Canonical_EWB_"):
+                        import ewb_adapter as _ca
+                        source = "E-Way Bill"
+                    elif name.startswith("Canonical_GSTR2A_"):
+                        import gstr2a_adapter as _ca
+                        source = "GSTR-2A"
                     else:
                         import gstr2b_adapter as _ca
                         source = "GSTR-2B"

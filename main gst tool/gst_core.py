@@ -445,6 +445,28 @@ def use_canonical_ewb(path):
         return False
 
 
+def use_canonical_r2a(path):
+    """True when GSTR-2A should be read through the canonical layer (gstr2a_adapter.py): the switch
+    gst_config.R2A_USE_CANONICAL (or env GST_R2A_CANONICAL=1/0) is on, or `path` already IS a canonical
+    GSTR-2A workbook."""
+    env = os.environ.get("GST_R2A_CANONICAL")
+    if env is not None:
+        on = env.strip() == "1"
+    else:
+        try:
+            import gst_config
+            on = bool(getattr(gst_config, "R2A_USE_CANONICAL", False))
+        except ImportError:
+            on = False
+    if on:
+        return True
+    try:
+        import gstr2a_adapter
+        return gstr2a_adapter.is_canonical_file(path)
+    except ImportError:
+        return False
+
+
 def _looks_like_gstr3b_merged(path):
     """Content signature for the merged GSTR-3B workbook: at least one sheet
     contains the literal 'Form GSTR-3B' banner text. Sheet NAMES (e.g.
@@ -772,6 +794,14 @@ def classify_folder(folder="."):
                 import einv_adapter
                 if einv_adapter.is_canonical_file(f):
                     einv_files.append(f); continue
+            except ImportError:
+                pass
+        # A canonical GSTR-2A workbook (written by gstr2a_adapter.py -- docs/GSTR2A_CANONICAL_SPEC.md).
+        if "META" in sn and "R2A_B2B" in sn and "MAPPING_REPORT" in sn:
+            try:
+                import gstr2a_adapter
+                if gstr2a_adapter.is_canonical_file(f):
+                    r2a_files.append(f); continue
             except ImportError:
                 pass
         if "b2b, sez, de" in sn and "b2b, sez, de_inv" not in sn:

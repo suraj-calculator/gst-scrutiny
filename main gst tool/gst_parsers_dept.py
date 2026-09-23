@@ -1417,6 +1417,9 @@ def parse_r2a_excel(path):
 
     Every downstream G-series check treats available=False as an explicit
     reason to SKIP, never as zero data."""
+    if path and os.path.exists(path) and mpu.use_canonical_r2a(path):
+        import gstr2a_adapter
+        return gstr2a_adapter.parse_r2a_excel(path)
     out = dict(available=False, reason=None, months_present=set(),
                b2b={}, b2ba={}, cdnr={}, cdnra={}, isd={},
                total_row_missing={}, malformed_gstin=[])

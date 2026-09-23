@@ -2449,6 +2449,8 @@ def main(folder="."):
         einv_adapter.set_context(gstin=res.get("self_gstin"))
         import ewb_adapter
         ewb_adapter.set_context(gstin=res.get("self_gstin"))
+        import gstr2a_adapter
+        gstr2a_adapter.set_context(gstin=res.get("self_gstin"))
     except ImportError:
         pass
     if not res["gstr1_month_map"] or not res["gstr3b_month_map"]:

@@ -57,3 +57,8 @@ EINV_USE_CANONICAL = True
 # engine. A canonical file supplied as input is always read through the adapter. Env override:
 # GST_EWB_CANONICAL=1 / 0.
 EWB_USE_CANONICAL = True
+
+# GSTR-2A conversion layer (spec: docs/GSTR2A_CANONICAL_SPEC.md). False = the original direct reader
+# (unchanged). True = merged GSTR-2A -> canonical workbook (gstr2a_adapter.py) -> engine. A canonical file
+# supplied as input is always read through the adapter. Env override: GST_R2A_CANONICAL=1 / 0.
+R2A_USE_CANONICAL = True
