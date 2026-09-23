@@ -467,6 +467,28 @@ def use_canonical_r2a(path):
         return False
 
 
+def use_canonical_ledger(path):
+    """True when a ledger CSV should be read through the canonical layer (ledger_adapter.py): the switch
+    gst_config.LEDGER_USE_CANONICAL (or env GST_LEDGER_CANONICAL=1/0) is on, or `path` already IS a canonical
+    ledger workbook."""
+    env = os.environ.get("GST_LEDGER_CANONICAL")
+    if env is not None:
+        on = env.strip() == "1"
+    else:
+        try:
+            import gst_config
+            on = bool(getattr(gst_config, "LEDGER_USE_CANONICAL", False))
+        except ImportError:
+            on = False
+    if on:
+        return True
+    try:
+        import ledger_adapter
+        return ledger_adapter.is_canonical_file(path)
+    except ImportError:
+        return False
+
+
 def _looks_like_gstr3b_merged(path):
     """Content signature for the merged GSTR-3B workbook: at least one sheet
     contains the literal 'Form GSTR-3B' banner text. Sheet NAMES (e.g.
@@ -747,6 +769,7 @@ def classify_folder(folder="."):
     # FY's data was silently discarded without any error or warning.
     gstr1_files, gstr3b_files, einv_files, gstr2b_files = [], [], [], []
     portal_comparison_files, ewb_candidates = [], []
+    canon_ledgers = []          # (path, kind) of canonical ledger workbooks supplied as input
     bo_profile_files = []
     gstr9_files, gstr9c_files, table8a_files, bs_pl_files = [], [], [], []
     hsn_sac_master_files = []
@@ -794,6 +817,15 @@ def classify_folder(folder="."):
                 import einv_adapter
                 if einv_adapter.is_canonical_file(f):
                     einv_files.append(f); continue
+            except ImportError:
+                pass
+        # A canonical ledger workbook (written by ledger_adapter.py -- docs/LEDGER_CANONICAL_SPEC.md).
+        if "META" in sn and "LEDGER_ROWS" in sn and "MAPPING_REPORT" in sn:
+            try:
+                import ledger_adapter
+                _lk = ledger_adapter.canonical_kind(f)
+                if _lk:
+                    canon_ledgers.append((f, _lk)); continue
             except ImportError:
                 pass
         # A canonical GSTR-2A workbook (written by gstr2a_adapter.py -- docs/GSTR2A_CANONICAL_SPEC.md).
@@ -942,6 +974,9 @@ def classify_folder(folder="."):
             liab_register_files.append(c)
         elif "liability ledger" in line:
             liab_demand_files.append(c)
+    for _f, _k in canon_ledgers:
+        {"cash": cash_ledgers, "credit": credit_ledgers, "liability": liab_register_files,
+         "liability_demand": liab_demand_files}[_k].append(_f)
 
     # self_gstin / company_name refinement from the FIRST merged GSTR-1's Read me sheet
     company_name = None

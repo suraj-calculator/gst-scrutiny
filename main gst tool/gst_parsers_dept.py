@@ -101,6 +101,9 @@ def parse_cash_or_liability_ledger(path, kind):
     shared code path; each kind's offsets are explicit below, verified against real exports.
     Returns dict(opening={...}, transactions=[...],
     monthly_by_tax_period={period: {...totals...}}, monthly_by_txn_date={period: {...}})."""
+    if mpu.use_canonical_ledger(path):
+        import ledger_adapter
+        return ledger_adapter.parse_cash_or_liability_ledger(path, kind)
     with open(path, newline="", encoding="utf-8-sig") as f:
         rows = list(csv.reader(f))
 
@@ -198,6 +201,9 @@ def parse_cash_or_liability_ledger(path, kind):
 # CREDIT LEDGER  (different layout: 1 Credit/Debit block + 1 Balance block)
 # ======================================================================
 def parse_credit_ledger(path):
+    if mpu.use_canonical_ledger(path):
+        import ledger_adapter
+        return ledger_adapter.parse_credit_ledger(path)
     with open(path, newline="", encoding="utf-8-sig") as f:
         rows = list(csv.reader(f))
     # cols: 0 Sr.No,1 Date,2 Reference No.,3 Tax Period,4 Description,5 Transaction Type,

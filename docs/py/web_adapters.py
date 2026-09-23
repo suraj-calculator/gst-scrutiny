@@ -351,6 +351,8 @@ def process_full_scrutiny(files, bs_pl_data, work_dir):
         _adw.clear_cache()
         import gstr2a_adapter as _ad2a
         _ad2a.clear_cache()
+        import ledger_adapter as _adl
+        _adl.clear_cache()
     except ImportError:
         pass
 
@@ -411,6 +413,12 @@ def process_full_scrutiny(files, bs_pl_data, work_dir):
                     elif name.startswith("Canonical_GSTR2A_"):
                         import gstr2a_adapter as _ca
                         source = "GSTR-2A"
+                    elif name.startswith(("Canonical_CASHLEDGER_", "Canonical_CREDITLEDGER_", "Canonical_LIABREGISTER_",
+                                          "Canonical_LIABLEDGER_")):
+                        import ledger_adapter as _ca
+                        source = {"Canonical_CASHLEDGER_": "Cash Ledger", "Canonical_CREDITLEDGER_": "Credit Ledger",
+                                  "Canonical_LIABREGISTER_": "Liability Register",
+                                  "Canonical_LIABLEDGER_": "Liability Ledger"}[name.split("_")[0] + "_" + name.split("_")[1] + "_"]
                     else:
                         import gstr2b_adapter as _ca
                         source = "GSTR-2B"

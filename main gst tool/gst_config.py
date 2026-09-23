@@ -62,3 +62,9 @@ EWB_USE_CANONICAL = True
 # (unchanged). True = merged GSTR-2A -> canonical workbook (gstr2a_adapter.py) -> engine. A canonical file
 # supplied as input is always read through the adapter. Env override: GST_R2A_CANONICAL=1 / 0.
 R2A_USE_CANONICAL = True
+
+# Ledger conversion layer (spec: docs/LEDGER_CANONICAL_SPEC.md) - the four ledger CSVs (cash, credit, liability
+# register, liability ledger/DRC). False = the original direct readers (unchanged). True = ledger CSV -> canonical
+# workbook (ledger_adapter.py) -> engine. A canonical ledger workbook supplied as input is always read through the
+# adapter. Env override: GST_LEDGER_CANONICAL=1 / 0.
+LEDGER_USE_CANONICAL = True
