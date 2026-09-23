@@ -353,6 +353,10 @@ def process_full_scrutiny(files, bs_pl_data, work_dir):
         _ad2a.clear_cache()
         import ledger_adapter as _adl
         _adl.clear_cache()
+        import table8a_adapter as _ad8
+        _ad8.clear_cache()
+        import boprofile_adapter as _adbo
+        _adbo.clear_cache()
     except ImportError:
         pass
 
@@ -413,6 +417,12 @@ def process_full_scrutiny(files, bs_pl_data, work_dir):
                     elif name.startswith("Canonical_GSTR2A_"):
                         import gstr2a_adapter as _ca
                         source = "GSTR-2A"
+                    elif name.startswith("Canonical_TABLE8A_"):
+                        import table8a_adapter as _ca
+                        source = "Table 8A"
+                    elif name.startswith("Canonical_BOPROFILE_"):
+                        import boprofile_adapter as _ca
+                        source = "BO Profile"
                     elif name.startswith(("Canonical_CASHLEDGER_", "Canonical_CREDITLEDGER_", "Canonical_LIABREGISTER_",
                                           "Canonical_LIABLEDGER_")):
                         import ledger_adapter as _ca

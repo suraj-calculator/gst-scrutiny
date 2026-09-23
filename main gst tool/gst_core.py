@@ -489,6 +489,48 @@ def use_canonical_ledger(path):
         return False
 
 
+def use_canonical_t8a(path):
+    """True when the Table 8A workbook should be read through the canonical layer (table8a_adapter.py): the switch
+    gst_config.TABLE8A_USE_CANONICAL (or env GST_T8A_CANONICAL=1/0) is on, or `path` already IS a canonical the Table 8A workbook workbook."""
+    env = os.environ.get("GST_T8A_CANONICAL")
+    if env is not None:
+        on = env.strip() == "1"
+    else:
+        try:
+            import gst_config
+            on = bool(getattr(gst_config, "TABLE8A_USE_CANONICAL", False))
+        except ImportError:
+            on = False
+    if on:
+        return True
+    try:
+        import table8a_adapter
+        return table8a_adapter.is_canonical_file(path)
+    except ImportError:
+        return False
+
+
+def use_canonical_bo(path):
+    """True when the BO Profile workbook should be read through the canonical layer (boprofile_adapter.py): the switch
+    gst_config.BOPROFILE_USE_CANONICAL (or env GST_BO_CANONICAL=1/0) is on, or `path` already IS a canonical the BO Profile workbook workbook."""
+    env = os.environ.get("GST_BO_CANONICAL")
+    if env is not None:
+        on = env.strip() == "1"
+    else:
+        try:
+            import gst_config
+            on = bool(getattr(gst_config, "BOPROFILE_USE_CANONICAL", False))
+        except ImportError:
+            on = False
+    if on:
+        return True
+    try:
+        import boprofile_adapter
+        return boprofile_adapter.is_canonical_file(path)
+    except ImportError:
+        return False
+
+
 def _looks_like_gstr3b_merged(path):
     """Content signature for the merged GSTR-3B workbook: at least one sheet
     contains the literal 'Form GSTR-3B' banner text. Sheet NAMES (e.g.
@@ -843,6 +885,19 @@ def classify_folder(folder="."):
         # GSTR-9 / GSTR-9C / BO Profile: now supplied as Excel exports (previously PDF --
         # the PDF-classification path for these three was removed; nothing else in this
         # tool parses a PDF, so there is no PDF fallback for these three doc types).
+        # Canonical BO Profile / Table 8A workbooks (boprofile_adapter.py / table8a_adapter.py).
+        if "META" in sn and "MAPPING_REPORT" in sn:
+            try:
+                if "BO_DEMOGRAPHIC" in sn:
+                    import boprofile_adapter
+                    if boprofile_adapter.is_canonical_file(f):
+                        bo_profile_files.append(f); continue
+                if "T8A_B2B" in sn:
+                    import table8a_adapter
+                    if table8a_adapter.is_canonical_file(f):
+                        table8a_files.append(f); continue
+            except ImportError:
+                pass
         if _looks_like_gstr9c_excel(sn):
             gstr9c_files.append(f); continue
         if _looks_like_gstr9_excel(sn):

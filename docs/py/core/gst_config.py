@@ -68,3 +68,10 @@ R2A_USE_CANONICAL = True
 # workbook (ledger_adapter.py) -> engine. A canonical ledger workbook supplied as input is always read through the
 # adapter. Env override: GST_LEDGER_CANONICAL=1 / 0.
 LEDGER_USE_CANONICAL = True
+
+# Table 8A and BO Profile conversion layers (specs: docs/TABLE8A_CANONICAL_SPEC.md, docs/BOPROFILE_CANONICAL_SPEC.md).
+# False = the original direct readers (unchanged). True = government export -> canonical workbook
+# (table8a_adapter.py / boprofile_adapter.py) -> engine. A canonical file supplied as input is always read through its adapter.
+# Env overrides: GST_T8A_CANONICAL=1 / 0, GST_BO_CANONICAL=1 / 0.
+TABLE8A_USE_CANONICAL = True
+BOPROFILE_USE_CANONICAL = True

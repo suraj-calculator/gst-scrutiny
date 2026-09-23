@@ -754,6 +754,9 @@ def parse_table_8a(path):
     have different column counts for the same sheet (see _t8a_header_map's docstring).
     The row-validity test (GSTIN-shaped token) is applied at whichever column the
     GSTIN was actually found in, not a hardcoded column B."""
+    if path and os.path.exists(path) and mpu.use_canonical_t8a(path):
+        import table8a_adapter
+        return table8a_adapter.parse_table_8a(path)
     out = dict(available=False, reason=None, b2b=[], cdnr=[], totals={})
     if not path or not os.path.exists(path):
         out["reason"] = "Table 8A not supplied for this taxpayer/FY."
@@ -1014,6 +1017,9 @@ def _bxl_list_table(ws, field_map, name_frag_gstin="gstin"):
 
 
 def parse_bo_profile(path):
+    if path and os.path.exists(path) and mpu.use_canonical_bo(path):
+        import boprofile_adapter
+        return boprofile_adapter.parse_bo_profile(path)
     out = dict(
         self_gstin=None, legal_name=None, trade_name=None, demographic={},
         financial_by_fy={}, bifa_by_fy={}, itc_passed_by_fy={}, itc_received_by_fy={},
