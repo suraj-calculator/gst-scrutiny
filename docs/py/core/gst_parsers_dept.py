@@ -254,6 +254,9 @@ def parse_credit_ledger(path):
 # PORTAL "Tax liability and ITC comparison" report (Excel, Comparison Summary sheet)
 # ======================================================================
 def parse_portal_comparison(path):
+    if mpu.use_canonical_portal(path):
+        import portal_adapter
+        return portal_adapter.parse_portal_comparison(path)
     wb = openpyxl.load_workbook(path, data_only=True)
     if "Comparison Summary" not in wb.sheetnames:
         return {}

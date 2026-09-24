@@ -80,3 +80,8 @@ BOPROFILE_USE_CANONICAL = True
 # True = government Excel export -> canonical workbook (gstr9_adapter.py) -> engine. A canonical file supplied as input is
 # always read through the adapter. Env override: GST_R9_CANONICAL=1 / 0.
 GSTR9_USE_CANONICAL = True
+
+# Portal "Tax liability and ITC comparison" conversion layer (spec: docs/PORTAL_COMPARISON_CANONICAL_SPEC.md). False = the original
+# direct reader (unchanged). True = portal report -> canonical workbook (portal_adapter.py) -> engine. A canonical file supplied
+# as input is always read through the adapter. Env override: GST_PORTAL_CANONICAL=1 / 0.
+PORTAL_USE_CANONICAL = True

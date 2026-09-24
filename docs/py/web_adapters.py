@@ -357,6 +357,8 @@ def process_full_scrutiny(files, bs_pl_data, work_dir):
         _ad8.clear_cache()
         import gstr9_adapter as _ad9
         _ad9.clear_cache()
+        import portal_adapter as _adp
+        _adp.clear_cache()
         import boprofile_adapter as _adbo
         _adbo.clear_cache()
     except ImportError:
@@ -422,6 +424,9 @@ def process_full_scrutiny(files, bs_pl_data, work_dir):
                     elif name.startswith(("Canonical_GSTR9_", "Canonical_GSTR9C_")):
                         import gstr9_adapter as _ca
                         source = "GSTR-9C" if name.startswith("Canonical_GSTR9C_") else "GSTR-9"
+                    elif name.startswith("Canonical_PORTALCOMPARISON_"):
+                        import portal_adapter as _ca
+                        source = "Portal comparison"
                     elif name.startswith("Canonical_TABLE8A_"):
                         import table8a_adapter as _ca
                         source = "Table 8A"

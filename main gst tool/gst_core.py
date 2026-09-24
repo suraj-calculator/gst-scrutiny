@@ -552,6 +552,27 @@ def use_canonical_r9(path):
         return False
 
 
+def use_canonical_portal(path):
+    """True when the portal comparison report should be read through the canonical layer (portal_adapter.py): the switch
+    gst_config.PORTAL_USE_CANONICAL (or env GST_PORTAL_CANONICAL=1/0) is on, or `path` already IS a canonical portal-comparison workbook."""
+    env = os.environ.get("GST_PORTAL_CANONICAL")
+    if env is not None:
+        on = env.strip() == "1"
+    else:
+        try:
+            import gst_config
+            on = bool(getattr(gst_config, "PORTAL_USE_CANONICAL", False))
+        except ImportError:
+            on = False
+    if on:
+        return True
+    try:
+        import portal_adapter
+        return portal_adapter.is_canonical_file(path)
+    except ImportError:
+        return False
+
+
 def _looks_like_gstr3b_merged(path):
     """Content signature for the merged GSTR-3B workbook: at least one sheet
     contains the literal 'Form GSTR-3B' banner text. Sheet NAMES (e.g.
@@ -901,6 +922,13 @@ def classify_folder(folder="."):
                 pass
         if "b2b, sez, de" in sn and "b2b, sez, de_inv" not in sn:
             einv_files.append(f); continue
+        if "META" in sn and "COMPARISON_ROWS" in sn and "MAPPING_REPORT" in sn:      # canonical (portal_adapter.py)
+            try:
+                import portal_adapter
+                if portal_adapter.is_canonical_file(f):
+                    portal_comparison_files.append(f); continue
+            except ImportError:
+                pass
         if "Comparison Summary" in sn:
             portal_comparison_files.append(f); continue
         # GSTR-9 / GSTR-9C / BO Profile: now supplied as Excel exports (previously PDF --
