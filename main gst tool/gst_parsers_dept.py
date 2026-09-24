@@ -389,6 +389,9 @@ def parse_gstr9(path):
     Table 6/7/8's full ITC breakdown, and the Part-I filing ARN/date.
     available=False (with reason) if the file is absent or unreadable -- NEVER
     raises. A field genuinely absent from this return stays None, never guessed."""
+    if path and os.path.exists(path) and mpu.use_canonical_r9(path):
+        import gstr9_adapter
+        return gstr9_adapter.parse_gstr9(path)
     out = dict(available=False, reason=None, is_system_draft=None,
                 fy=None, gstin=None, legal_name=None,
                 table4_b2b_taxable=None, table4_b2b_igst=None, table4_b2b_cgst=None, table4_b2b_sgst=None,
@@ -585,6 +588,9 @@ def parse_gstr9c(path):
     carry these as free text with the exact rupee amount named), which is a genuine
     exact-tie-out opportunity this PDF-era scrape never had access to. Same
     graceful-degrade contract as parse_gstr9()."""
+    if path and os.path.exists(path) and mpu.use_canonical_r9(path):
+        import gstr9_adapter
+        return gstr9_adapter.parse_gstr9c(path)
     out = dict(available=False, reason=None, fy=None, gstin=None, legal_name=None,
                 arn=None, arn_date=None,
                 turnover_audited_bs=None, turnover_after_adjustments=None,

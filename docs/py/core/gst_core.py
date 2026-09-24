@@ -531,6 +531,27 @@ def use_canonical_bo(path):
         return False
 
 
+def use_canonical_r9(path):
+    """True when GSTR-9 / GSTR-9C should be read through the canonical layer (gstr9_adapter.py): the switch
+    gst_config.GSTR9_USE_CANONICAL (or env GST_R9_CANONICAL=1/0) is on, or `path` already IS a canonical GSTR-9 / 9C workbook."""
+    env = os.environ.get("GST_R9_CANONICAL")
+    if env is not None:
+        on = env.strip() == "1"
+    else:
+        try:
+            import gst_config
+            on = bool(getattr(gst_config, "GSTR9_USE_CANONICAL", False))
+        except ImportError:
+            on = False
+    if on:
+        return True
+    try:
+        import gstr9_adapter
+        return gstr9_adapter.is_canonical_file(path)
+    except ImportError:
+        return False
+
+
 def _looks_like_gstr3b_merged(path):
     """Content signature for the merged GSTR-3B workbook: at least one sheet
     contains the literal 'Form GSTR-3B' banner text. Sheet NAMES (e.g.
@@ -885,6 +906,17 @@ def classify_folder(folder="."):
         # GSTR-9 / GSTR-9C / BO Profile: now supplied as Excel exports (previously PDF --
         # the PDF-classification path for these three was removed; nothing else in this
         # tool parses a PDF, so there is no PDF fallback for these three doc types).
+        # Canonical GSTR-9 / GSTR-9C workbooks (gstr9_adapter.py).
+        if "META" in sn and "R9_FACTS" in sn and "MAPPING_REPORT" in sn:
+            try:
+                import gstr9_adapter
+                _rf = gstr9_adapter.canonical_form(f)
+                if _rf == "gstr9c":
+                    gstr9c_files.append(f); continue
+                if _rf == "gstr9":
+                    gstr9_files.append(f); continue
+            except ImportError:
+                pass
         # Canonical BO Profile / Table 8A workbooks (boprofile_adapter.py / table8a_adapter.py).
         if "META" in sn and "MAPPING_REPORT" in sn:
             try:

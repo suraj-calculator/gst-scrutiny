@@ -75,3 +75,8 @@ LEDGER_USE_CANONICAL = True
 # Env overrides: GST_T8A_CANONICAL=1 / 0, GST_BO_CANONICAL=1 / 0.
 TABLE8A_USE_CANONICAL = True
 BOPROFILE_USE_CANONICAL = True
+
+# GSTR-9 / GSTR-9C conversion layer (spec: docs/GSTR9_CANONICAL_SPEC.md). False = the original direct readers (unchanged).
+# True = government Excel export -> canonical workbook (gstr9_adapter.py) -> engine. A canonical file supplied as input is
+# always read through the adapter. Env override: GST_R9_CANONICAL=1 / 0.
+GSTR9_USE_CANONICAL = True

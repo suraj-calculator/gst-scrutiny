@@ -40,6 +40,8 @@ const PY_FILES = [
   "core/table8a_mapping.json",
   "core/boprofile_adapter.py",
   "core/boprofile_mapping.json",
+  "core/gstr9_adapter.py",
+  "core/gstr9_mapping.json",
   "core/gstr1_adapter.py",
   "core/gstr1_mapping.json",
   "core/gstr2a_adapter.py",
