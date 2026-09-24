@@ -217,8 +217,10 @@ def build_canonical(path, kind):
                             raw_column=get_column_letter(c + 1) if c is not None else "", matched_by=mb, confidence=conf,
                             status="OK" if c is not None else "MISSING", rows_filled=0, rows_blank=0, note=note))
     if missing:
+        wrong = (f" The file's own title reads '{title}' - is it the right file for the {_LABEL[kind]}?"
+                 if kdef["title_keyword"] not in title.lower() else "")
         _fail(ctx, path, kind, "E903", f"required column(s) {missing} could not be located (headings found: "
-              f"{sorted(set(d for d in display if d))[:30]}). The ledger is unusable, so the ledger checks show N/A.",
+              f"{sorted(set(d for d in display if d))[:30]}). The ledger is unusable, so the ledger checks show N/A.{wrong}",
               "Supply the ledger as downloaded from the portal, or add the new heading to ledger_mapping.json.")
     mapped = {c for c in cols.values() if c is not None}
     fill = {f: [0, 0] for f in kdef["fields"]}

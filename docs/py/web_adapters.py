@@ -235,31 +235,43 @@ def process_gstr2b(files, work_dir):
     return process_merge("gstr2b", aligned, os.path.join(work_dir, "merge"))
 
 
-# merge kind -> (canonical-layer module, plain-language label). Only the 4 sources that have a
-# canonical converter so far (see the docs/*_CANONICAL_SPEC.md files).
+# source key -> (canonical-layer module, plain-language label, extra build argument or None).
+# Every source that has a canonical converter: the merge steps (einv, gstr1, gstr2a, gstr2b, gstr3b), the e-way bill
+# merge (ewb), and the files dropped in as they are (the four ledger CSVs, the portal comparison, Table 8A, BO Profile,
+# GSTR-9 and GSTR-9C). See the docs/*_CANONICAL_SPEC.md files.
 CANONICAL_ADAPTERS = {
-    "gstr1": ("gstr1_adapter", "GSTR-1"),
-    "gstr2a": ("gstr2a_adapter", "GSTR-2A"),
-    "gstr2b": ("gstr2b_adapter", "GSTR-2B"),
-    "gstr3b": ("gstr3b_adapter", "GSTR-3B"),
-    "einv": ("einv_adapter", "E-Invoice"),
+    "gstr1": ("gstr1_adapter", "GSTR-1", None),
+    "gstr2a": ("gstr2a_adapter", "GSTR-2A", None),
+    "gstr2b": ("gstr2b_adapter", "GSTR-2B", None),
+    "gstr3b": ("gstr3b_adapter", "GSTR-3B", None),
+    "einv": ("einv_adapter", "E-Invoice", None),
+    "ewb": ("ewb_adapter", "E-Way Bill", None),
+    "ledger_cash": ("ledger_adapter", "Cash Ledger", "cash"),
+    "ledger_credit": ("ledger_adapter", "Credit Ledger", "credit"),
+    "ledger_liability": ("ledger_adapter", "Liability Register", "liability"),
+    "ledger_liability_demand": ("ledger_adapter", "Liability Ledger", "liability_demand"),
+    "portal": ("portal_adapter", "Tax liability and ITC comparison", None),
+    "table8a": ("table8a_adapter", "Table 8A", None),
+    "bo": ("boprofile_adapter", "BO Profile", None),
+    "gstr9": ("gstr9_adapter", "GSTR-9", "gstr9"),
+    "gstr9c": ("gstr9_adapter", "GSTR-9C", "gstr9c"),
 }
 
 
 def process_canonical_preview(source, name, data, work_dir):
     """
-    Converts ONE already-merged workbook (the output of process_merge / process_gstr2b /
-    process_gstr3b) to its canonical form right away, so the upload step itself can show
-    "converted OK" / the exact issues, instead of only finding out at the end of a full run.
+    Converts ONE file (a merge step's output, or a file dropped in as it is) to its canonical form right away, so
+    the upload step itself can show "converted OK" / the exact issues, instead of only finding out at the end of a
+    full run.
 
-    source: one of CANONICAL_ADAPTERS' keys ("gstr1", "gstr2b", "gstr3b", "einv").
-    name, data: the merged file's own name and bytes (what process_merge/... returned).
+    source: one of CANONICAL_ADAPTERS' keys.
+    name, data: the file's own name and bytes.
     work_dir: an empty folder to do the work in (caller creates/cleans it).
 
-    This is a PREVIEW, purely additive: it does NOT change what process_full_scrutiny is
-    given (still the raw merged file, converted again there exactly as before) or anything in
-    the canonical-layer code itself. It costs a few extra seconds of conversion at upload time
-    in exchange for surfacing a mapping problem right away instead of at the end of a full run.
+    This is a PREVIEW, purely additive: it does NOT change what process_full_scrutiny is given (still the file as
+    uploaded / merged, converted again there exactly as before) or anything in the canonical-layer code itself. It
+    costs a few extra seconds of conversion at upload time in exchange for surfacing a mapping problem right away
+    instead of at the end of a full run.
 
     Returns {"ok": True, "status": "OK"|"OK_WITH_WARNINGS"|"OK_WITH_ERRORS", "source_label": str,
              "canonical_name": str, "canonical_bytes": bytes,
@@ -269,7 +281,7 @@ def process_canonical_preview(source, name, data, work_dir):
     """
     if source not in CANONICAL_ADAPTERS:
         raise ValueError(f"no canonical layer for {source!r}")
-    module_name, label = CANONICAL_ADAPTERS[source]
+    module_name, label, extra = CANONICAL_ADAPTERS[source]
     adapter = importlib.import_module(module_name)
 
     os.makedirs(work_dir, exist_ok=True)
@@ -278,11 +290,15 @@ def process_canonical_preview(source, name, data, work_dir):
         f.write(data)
 
     try:
-        canon_data = adapter.build_canonical(src_path)
+        canon_data = adapter.build_canonical(src_path) if extra is None else adapter.build_canonical(src_path, extra)
     except Exception as e:  # noqa: BLE001 - a plain message either way, never a crash mid-upload
         return {"ok": False, "source_label": label, "error": str(e)}
 
-    out_path = adapter.write_canonical(canon_data, os.path.join(work_dir, "_canonical"))
+    out_dir = os.path.join(work_dir, "_canonical")
+    if source == "ewb":                     # the e-way bill canonical file is named after its source file
+        out_path = adapter.write_canonical(canon_data, out_dir, source_path=src_path)
+    else:
+        out_path = adapter.write_canonical(canon_data, out_dir)
     issues = [{"id": i["id"], "severity": i["severity"], "message": i["message"]}
               for i in canon_data["issues"] if i["severity"] in ("ERROR", "WARNING")]
     status = dict(canon_data["meta"]).get("status", "OK")

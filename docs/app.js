@@ -17,10 +17,10 @@ const ICONS = {
 
 // ---- section config -----------------------------------------------------
 const UPLOAD_SECTIONS = [
-  { id: "ewb_inward", step: 1, title: "Inward E-Way Bill", required: false, py: { kind: "ewb", direction: "inward" },
+  { id: "ewb_inward", step: 1, title: "Inward E-Way Bill", required: false, py: { kind: "ewb", direction: "inward" }, canonicalSource: "ewb",
     desc: "EWB MIS Report exports from the inward E-Way Bill portal folder.",
     accept: "EWB_MIS_Report_Excel (N).xls" },
-  { id: "ewb_outward", step: 2, title: "Outward E-Way Bill", required: false, py: { kind: "ewb", direction: "outward" },
+  { id: "ewb_outward", step: 2, title: "Outward E-Way Bill", required: false, py: { kind: "ewb", direction: "outward" }, canonicalSource: "ewb",
     desc: "EWB MIS Report exports from the outward E-Way Bill portal folder.",
     accept: "EWB_MIS_Report_Excel (N).xls" },
   { id: "einv", step: 3, title: "E-Invoice", required: false, py: { kind: "merge", mergeKind: "einv" }, canonicalSource: "einv",
@@ -42,17 +42,17 @@ const UPLOAD_SECTIONS = [
 ];
 
 const LEDGER_SLOTS = [
-  { id: "cash", name: "Cash Ledger", ext: "CSV" },
-  { id: "credit", name: "Credit Ledger", ext: "CSV" },
-  { id: "liab1", name: "Liability Register — Part I", ext: "CSV" },
-  { id: "liab2", name: "Liability Ledger — Part II (DRC)", ext: "CSV" },
-  { id: "comparison", name: "Tax Liability & ITC Comparison", ext: "XLSX" },
-  { id: "table8a", name: "Table 8A", ext: "XLSX" },
+  { id: "cash", name: "Cash Ledger", ext: "CSV", canonicalSource: "ledger_cash" },
+  { id: "credit", name: "Credit Ledger", ext: "CSV", canonicalSource: "ledger_credit" },
+  { id: "liab1", name: "Liability Register — Part I", ext: "CSV", canonicalSource: "ledger_liability" },
+  { id: "liab2", name: "Liability Ledger — Part II (DRC)", ext: "CSV", canonicalSource: "ledger_liability_demand" },
+  { id: "comparison", name: "Tax Liability & ITC Comparison", ext: "XLSX", canonicalSource: "portal" },
+  { id: "table8a", name: "Table 8A", ext: "XLSX", canonicalSource: "table8a" },
 ];
 const ANNUAL_DOC_SLOTS = [
-  { id: "bo_profile", name: "BO / 360° Profile", ext: "XLSX" },
-  { id: "gstr9", name: "GSTR-9 Annual Return", ext: "XLSX" },
-  { id: "gstr9c", name: "GSTR-9C Reconciliation", ext: "XLSX" },
+  { id: "bo_profile", name: "BO / 360° Profile", ext: "XLSX", canonicalSource: "bo" },
+  { id: "gstr9", name: "GSTR-9 Annual Return", ext: "XLSX", canonicalSource: "gstr9" },
+  { id: "gstr9c", name: "GSTR-9C Reconciliation", ext: "XLSX", canonicalSource: "gstr9c" },
 ];
 const MASTER_SLOTS = [
   { id: "hsn_master", name: "HSN / SAC Code Master", ext: "XLSX" },
@@ -347,7 +347,8 @@ function slotSectionHtml(id, title, desc, slots, opts) {
             </span>
             <span class="slot-status">${opts.disabled ? "—" : "Empty"}</span>
             ${opts.disabled ? "" : `<button class="slot-clear" type="button" data-slotclear="${id}:${sl.id}">Clear</button><input type="file" data-slotinput="${id}:${sl.id}">`}
-          </div>`).join("")}
+          </div>
+          ${sl.canonicalSource ? `<div class="slot-result" data-slotresult="${id}:${sl.id}"></div>` : ""}`).join("")}
       </div>
       ${opts.persist ? `<p class="persist-note">${ICONS.lock} Saved in this browser — you won't need to re-upload these next time.</p>` : ""}
       ${opts.footnote ? `<p class="card-desc" style="margin-top:12px;">${opts.footnote}</p>` : ""}
@@ -647,6 +648,33 @@ UPLOAD_SECTIONS.forEach(cfg => {
 // ---------------------------------------------------------------------
 // Ledgers / masters — real byte capture, no processing needed
 // ---------------------------------------------------------------------
+// "Converted OK / here are the issues" for a file dropped in as it is (ledgers, portal comparison, Table 8A,
+// BO Profile, GSTR-9 / 9C): the same extra check the merge steps show, run right after the file is captured. Purely
+// additive - the file itself is unchanged and is what the full scrutiny still receives.
+const slotPreviewToken = {};
+async function previewSlotConversion(key, sl, fileName, bytes) {
+  const box = document.querySelector(`[data-slotresult="${key}"]`);
+  if (!box) return;
+  const token = (slotPreviewToken[key] = (slotPreviewToken[key] || 0) + 1);
+  if (!workerReady) {
+    box.innerHTML = `<div class="result-line warn">${ICONS.warn}<p>The Python runtime is still loading, so the conversion check was skipped for this file. Re-add it once the runtime is ready to see it.</p></div>`;
+    return;
+  }
+  box.innerHTML = `<div class="progress-wrap"><div class="progress-track"><div class="progress-fill" data-fill></div></div><div class="progress-label">Converting to the fixed canonical format…</div></div>`;
+  requestAnimationFrame(() => { const f = box.querySelector("[data-fill]"); if (f) f.style.width = "100%"; });
+  let canon;
+  try {
+    canon = await callCanonicalPreview(sl.canonicalSource, fileName, bytes, () => {});
+  } catch (err) {
+    console.error(err);
+    canon = { ok: false, error: String((err && err.message) || err) };
+  }
+  if (slotPreviewToken[key] !== token || !workbench[key]) return;      // cleared or replaced meanwhile
+  box.innerHTML = renderCanonicalBlock(canon);
+  const btn = box.querySelector('[data-action="download-canon"]');
+  if (btn) btn.addEventListener("click", () => downloadBytes(canon.canonical_bytes, canon.canonical_name));
+}
+
 function wireSlotSection(sectionId, slots, opts) {
   opts = opts || {};
   const doneSlots = new Set();
@@ -666,6 +694,7 @@ function wireSlotSection(sectionId, slots, opts) {
       setStatus(sectionId, doneSlots.size === slots.length ? "ready" : "processing", `${doneSlots.size} of ${slots.length}`);
       if (doneSlots.size > 0) markDone(sectionId);
       if (opts.persist) persistMaster(sl.id, file.name, bytes);
+      if (sl.canonicalSource) previewSlotConversion(key, sl, file.name, bytes);
     }
 
     // Resets just this one slot (e.g. the wrong file was dropped in) —
@@ -681,6 +710,9 @@ function wireSlotSection(sectionId, slots, opts) {
       setStatus(sectionId, doneSlots.size === 0 ? "empty" : "processing", doneSlots.size === 0 ? "Not started" : `${doneSlots.size} of ${slots.length}`);
       if (doneSlots.size === 0) markUndone(sectionId);
       if (opts.persist) removePersistedMaster(sl.id);
+      const rbox = document.querySelector(`[data-slotresult="${key}"]`);
+      if (rbox) rbox.innerHTML = "";
+      slotPreviewToken[key] = (slotPreviewToken[key] || 0) + 1;
     }
 
     el.addEventListener("click", () => input.click());
