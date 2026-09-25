@@ -83,6 +83,27 @@ def fy_years(fy):
     return y1, y2
 
 
+_QUARTER_NAMES = {1: "APR-JUN", 2: "JUL-SEP", 3: "OCT-DEC", 4: "JAN-MAR"}
+
+
+def _normalise_tax_period(tax_period):
+    """Upper-case Tax Period text with the spellings a quarterly return may carry folded onto the three the parser knows
+    (month name / 'Apr-Jun' / numeric MMYYYY): 'Jan - Mar', 'January-March', 'Jan-Mar 2024', 'January to March', a range
+    inside brackets, and 'Quarter 4' / 'Qtr-4' / 'Q4' (Q1 = Apr-Jun ... Q4 = Jan-Mar). Anything else is returned unchanged
+    (upper-cased) and rejected by the caller exactly as before."""
+    tp = str(tax_period).strip().upper()
+    m = re.fullmatch(r"(?:QUARTER|QTR|Q)\s*-?\s*([1-4])(?:\s*\(.*\))?", tp)
+    if m:
+        return _QUARTER_NAMES[int(m.group(1))]
+    m = re.search(r"\b([A-Z]{3,9})\s*(?:-|TO)\s*([A-Z]{3,9})\b", tp)
+    if m and m.group(1)[:3] in MONTH_NAME_TO_NUM_3 and m.group(2)[:3] in MONTH_NAME_TO_NUM_3:
+        return f"{m.group(1)[:3]}-{m.group(2)[:3]}"
+    return tp
+
+
+MONTH_NAME_TO_NUM_3 = {k for k in MONTH_NAME_TO_NUM if len(k) == 3}
+
+
 def months_for_tax_period(fy, tax_period):
     """Return list of 'Mon-YY' calendar-month labels this marker covers.
     1 label for a month marker, 3 for a quarter marker. Raises PeriodParseError
@@ -90,7 +111,7 @@ def months_for_tax_period(fy, tax_period):
     MMYYYY, or a quarter like 'Apr-Jun') -- stays flexible across formats
     since real files may use any of the three, but does not guess beyond them."""
     y1, y2 = fy_years(fy)
-    tp = tax_period.strip().upper()
+    tp = _normalise_tax_period(tax_period)
 
     if re.match(r"^\d{6}$", tp):                 # numeric MMYYYY, e.g. '042022'
         month_nums = [int(tp[:2])]
@@ -840,6 +861,42 @@ def _first_row_lower(path, sheet_name):
         wb.close()
 
 
+_GSTIN_HDR_RE = re.compile(r"\b(\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z])\b")
+
+
+def _gstin_from_headers(paths, max_rows=40):
+    """The GSTIN most often stated in the header (first rows) of the given xlsx / csv files: a cell with a 'GSTIN' label next
+    to a GSTIN, or a 'GSTIN: 05ABC...' style cell. Never raises; None if nothing is found."""
+    from collections import Counter
+    votes = Counter()
+    for p in paths:
+        try:
+            if str(p).lower().endswith(".csv"):
+                with open(p, newline="", encoding="utf-8-sig", errors="replace") as f:
+                    rows = [r for _, r in zip(range(max_rows), csv.reader(f))]
+                sheets = [rows]
+            else:
+                wb = openpyxl.load_workbook(p, read_only=True, data_only=True)
+                try:
+                    sheets = [[list(r) for _, r in zip(range(max_rows), wb[sn].iter_rows(values_only=True))] for sn in wb.sheetnames[:6]]
+                finally:
+                    wb.close()
+            found = set()
+            for rows in sheets:
+                for r in rows:
+                    cells = [str(c).strip() for c in r if c not in (None, "")]
+                    for i, c in enumerate(cells):
+                        if "gstin" in c.lower():
+                            m = _GSTIN_HDR_RE.search(c.upper()) or (_GSTIN_HDR_RE.search(cells[i + 1].upper()) if i + 1 < len(cells) else None)
+                            if m:
+                                found.add(m.group(1))
+            for g in found:
+                votes[g] += 1
+        except Exception:  # noqa: BLE001 - a file we cannot peek into simply does not vote
+            continue
+    return votes.most_common(1)[0][0] if votes else None
+
+
 def classify_folder(folder="."):
     xlsx = sorted(glob.glob(os.path.join(folder, "*.xlsx")) + glob.glob(os.path.join(folder, "*.xlsm")))
     csvs = sorted(glob.glob(os.path.join(folder, "*.csv")))
@@ -1103,9 +1160,22 @@ def classify_folder(folder="."):
     # e-way bill files to infer the GSTIN from: the taxpayer's own GSTR-3B sheets state both
     # GSTIN and Legal name in-sheet. Only ever fills what is still empty -- never overrides.
     if (not self_gstin or not company_name) and gstr3b_files:
-        g3_gstin, g3_name = _gstr3b_gstin_and_name(gstr3b_files[0])
+        try:
+            g3_gstin, g3_name = _gstr3b_gstin_and_name(gstr3b_files[0])
+        except Exception as ex:      # an unreadable 3B (e.g. an unrecognised Tax Period) must not stop the fallbacks below
+            print(f"[warn] Could not read the GSTIN from the GSTR-3B ({ex}); trying the other supplied files.")
+            g3_gstin, g3_name = None, None
         self_gstin = self_gstin or g3_gstin
         company_name = company_name or g3_name
+    # Last resort: every other file the taxpayer supplied that states the GSTIN in its own header (BO Profile, GSTR-9 / 9C,
+    # Table 8A, GSTR-2A / 2B, the four ledger CSVs, the portal comparison report). Most frequent GSTIN wins.
+    if not self_gstin:
+        _others = (list(bo_profile_files) + list(gstr9_files) + list(gstr9c_files) + list(table8a_files) + list(r2a_files)
+                   + list(gstr2b_files) + list(portal_comparison_files) + list(csvs))
+        self_gstin = _gstin_from_headers(_others)
+        if self_gstin:
+            print(f"[info] Taxpayer GSTIN {self_gstin} taken from the header of the other supplied files "
+                  f"(no e-way bill file, GSTR-1 'Read me' or readable GSTR-3B).")
 
     # The E-Invoice download states no GSTIN of its own, so its canonical file is named from the taxpayer's.
     try:

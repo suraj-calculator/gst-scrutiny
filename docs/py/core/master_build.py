@@ -2434,9 +2434,12 @@ def main(folder="."):
 
     if not res["self_gstin"]:
         raise RuntimeError(
-            "Could not determine self-GSTIN from the supplied files (no EWB annual "
-            "workbooks and no merged GSTR-1 'Read me' sheet found). Stopping -- "
-            "every output filename/header depends on this being correct."
+            "Could not determine the taxpayer's GSTIN from any supplied file. Tried: the e-way bill "
+            "workbooks, the merged GSTR-1 'Read me' sheet, the GSTR-3B sheets' header block, and the "
+            "headers of the BO Profile, GSTR-9 / 9C, Table 8A, GSTR-2A / 2B, the ledger CSVs and the "
+            "portal comparison report -- none of them was supplied, or none states a GSTIN. Stopping -- "
+            "every output filename/header depends on this being correct. Add any one of those files "
+            "(a GSTR-3B whose 'Tax Period' is readable is enough) and run again."
         )
     try:
         import gstr2b_adapter
