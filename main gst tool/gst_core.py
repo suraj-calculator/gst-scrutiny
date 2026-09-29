@@ -83,6 +83,51 @@ def fy_years(fy):
     return y1, y2
 
 
+# ---------------------------------------------------------------------------------------------------
+# PERIOD UNITS - a quarterly filer (QRMP) files ONE GSTR-3B for three months. The engine then analyses
+# that quarter as ONE period, labelled by the quarter's LAST month (e.g. 'Jun-25' = Apr-Jun 2025), and the
+# readers that serve a "month" (GSTR-1, E-Invoice, GSTR-2B, e-way bills) answer an anchor label with the
+# TOTAL of its months. A monthly filer has no units, so nothing changes for one.
+# ---------------------------------------------------------------------------------------------------
+PERIOD_UNITS = {}          # anchor label -> [month labels of that period, in calendar order]
+
+
+def set_period_units(units):
+    """Replace the registry (anchor -> months). Only multi-month units are kept."""
+    PERIOD_UNITS.clear()
+    for anchor, ms in (units or {}).items():
+        if len(ms) > 1:
+            PERIOD_UNITS[anchor] = list(ms)
+
+
+def unit_months(label):
+    """The months a period label stands for: [label] for a month, the quarter's months for a quarter's anchor."""
+    return PERIOD_UNITS.get(label) or [label]
+
+
+def unit_of(month):
+    """(anchor, months) of the multi-month unit that contains `month`, or None."""
+    for anchor, ms in PERIOD_UNITS.items():
+        if month in ms:
+            return anchor, ms
+    return None
+
+
+PARTIAL_UNITS = {}      # anchor -> months of that quarter for which the GSTR-1 (or 3B) has no data
+
+
+def period_title(label):
+    """'Jun-25' for a monthly period; 'Jun-25 (QUARTER Apr-25 to Jun-25, GSTR-3B filed quarterly)' for a quarter's anchor."""
+    ms = PERIOD_UNITS.get(label)
+    if ms and len(ms) > 1:
+        t = f"{label} (QUARTER {ms[0]} to {ms[-1]}, quarterly return)"
+        if PARTIAL_UNITS.get(label):
+            t += (f"  --  INCOMPLETE INPUT: {', '.join(PARTIAL_UNITS[label])} missing from the GSTR-1 file, so this quarter's "
+                  f"sales comparison is NOT reliable")
+        return t
+    return label
+
+
 _QUARTER_NAMES = {1: "APR-JUN", 2: "JUL-SEP", 3: "OCT-DEC", 4: "JAN-MAR"}
 
 

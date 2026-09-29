@@ -1129,7 +1129,7 @@ def main():
 
     # ---- Sheet 1: EXCEPTIONS (mismatches only) ----
     ws=wb.active; ws.title="Exceptions"
-    ws.cell(row=1,column=1,value=f"GST SCRUTINY  -  MISMATCHES ONLY  -  Period: {PERIOD_LABEL}").font=Font(bold=True,size=13,color="C00000")
+    ws.cell(row=1,column=1,value=f"GST SCRUTINY  -  MISMATCHES ONLY  -  Period: {mpu.period_title(PERIOD_LABEL)}").font=Font(bold=True,size=13,color="C00000")
     ws.cell(row=2,column=1,value=f"GSTIN {SELF_GSTIN}  |  {COMPANY_NAME or '(company auto-detected)'}  |  Tolerance: Rs {TOLERANCE}").font=Font(size=9,italic=True)
     hdr=["Section","Check","Left source","Left value","Right source","Right value","Difference","Result","Note / Tag"]
     for i,h in enumerate(hdr,1): ws.cell(row=4,column=i,value=h)
@@ -1142,7 +1142,7 @@ def main():
 
     # ---- Sheet 2: FULL COMPARISON ----
     ws2=wb.create_sheet("Full Comparison")
-    ws2.cell(row=1,column=1,value=f"GST SCRUTINY  -  FULL COMPARISON  -  Period: {PERIOD_LABEL}").font=Font(bold=True,size=13,color="1F3864")
+    ws2.cell(row=1,column=1,value=f"GST SCRUTINY  -  FULL COMPARISON  -  Period: {mpu.period_title(PERIOD_LABEL)}").font=Font(bold=True,size=13,color="1F3864")
     for i,h in enumerate(hdr,1): ws2.cell(row=3,column=i,value=h)
     style_header(ws2,3,9)
     write_rows(ws2,4,comparisons,only_mismatch=False)
@@ -2333,7 +2333,8 @@ def parse_annual_ewb(path):
 
 def filter_by_month(ewb_rows, month_key):
     """month_key e.g. 'Jan-23' -- matches on EWB date's month (not doc date)."""
-    return [r for r in ewb_rows if r["month"] == month_key]
+    unit = mpu.unit_months(month_key)      # a quarter's anchor label -> all of the quarter's months
+    return [r for r in ewb_rows if r["month"] in unit]
 
 
 

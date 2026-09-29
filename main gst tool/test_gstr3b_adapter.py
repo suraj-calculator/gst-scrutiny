@@ -204,12 +204,17 @@ def main():
         ok &= check("duplicate April sheet -> W301, first sheet used; helper sheet -> I401", {"W301", "I401"} <= ids, str(ids))
         ok &= check("first April sheet wins", ad.parse_gstr3b(raw4, "Apr-24")["3.1a"][0] == 1000.0)
 
-        # ---- quarterly period: legacy behaviour kept (months 2 and 3 are refused by parse_gstr3b)
+        # ---- quarterly period (QRMP): ONE return for three months, served under the quarter's LAST month only.
+        #      (The original served it under the first month, so it was compared with one month of sales.)
         raw5 = make_workbook(os.path.join(tmp, "3b_q.xlsx"), "new", tp_override={"Apr": "Apr-Jun"}, only=("Apr",))
         ad.clear_cache()
-        ok &= check("quarterly 3B: months() covers Apr-Jun, first month parses, later months refused like before",
-                    ad.months(raw5) >= {"Apr-24", "May-24", "Jun-24"} and exc(lambda: ad.parse_gstr3b(raw5, "Apr-24")) is None
-                    and exc(lambda: pr.parse_gstr3b(raw5, "May-24")) is not None)
+        ok &= check("quarterly 3B: months() covers Apr-Jun; the return is served under Jun-24 (quarter end); Apr-24 / May-24 refused",
+                    ad.months(raw5) >= {"Apr-24", "May-24", "Jun-24"} and exc(lambda: ad.parse_gstr3b(raw5, "Jun-24")) is None
+                    and exc(lambda: ad.parse_gstr3b(raw5, "Apr-24")) is not None and exc(lambda: ad.parse_gstr3b(raw5, "May-24")) is not None)
+        ok &= check("quarter_units() reports {Jun-24: [Apr-24, May-24, Jun-24]}; a monthly file reports none",
+                    ad.quarter_units(raw5) == {"Jun-24": ["Apr-24", "May-24", "Jun-24"]} and ad.quarter_units(raw) == {})
+        ok &= check("the quarter's figures are the return's own figures (no fan-out, not divided)",
+                    ad.parse_gstr3b(raw5, "Jun-24")["3.1a"][0] == ad.parse_gstr3b(make_workbook(os.path.join(tmp, "3b_m.xlsx"), "new", only=("Apr",)), "Apr-24")["3.1a"][0])
 
         # ---- errors
         open("corrupt.xlsx", "wb").write(open(raw, "rb").read()[:1500])

@@ -44,6 +44,21 @@ def main():
     ok &= check("3B merger: 'Quarter 4' / 'Q4' sort as the quarter's first month (Jan = 10), 'Jan - Mar' as before",
                 gmc.month_key("Quarter 4") == 10 and gmc.month_key("Q4") == 10 and gmc.month_key("Jan - Mar") == 10 and gmc.month_key("Apr-Jun") == 1 and gmc.month_key("Q1") == 1)
 
+    for sub in ("e invoice", "gstr2a"):
+        spec = importlib.util.spec_from_file_location("gmc_" + sub.replace(" ", ""), os.path.join(HERE, "..", "forms merger", "merger-tool", sub, "gst_merge_common.py"))
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        ok &= check(f"{sub} merger: quarterly labels sort by the quarter's first month",
+                    m.month_key("Quarter 4") == 10 and m.month_key("Jan - Mar") == 10 and m.month_key("Apr-Jun") == 1 and m.month_key("Q3") == 7 and m.month_key("April") == 1)
+        ok &= check(f"{sub} merger: period_key accepts a numeric MMYYYY, a month name and a quarter; a name without the year is an error",
+                    m.period_key("042024") == m.period_key("April", "2024-25") and m.period_key("Jan-Mar", "2023-24")[0] == m.period_key("March", "2023-24")[0]
+                    and m.period_key("Apr-Jun", "2024-25") < m.period_key("Jul-Sep", "2024-25"))
+        try:
+            m.period_key("Apr-Jun")
+            ok &= check(f"{sub} merger: quarter without a year is refused", False)
+        except ValueError:
+            ok &= check(f"{sub} merger: quarter without a year is refused", True)
+
     tmp = tempfile.mkdtemp()
     try:
         led = os.path.join(tmp, "Electronic_Cash_Ledger.csv")

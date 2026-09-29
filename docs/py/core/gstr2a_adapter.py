@@ -62,6 +62,29 @@ def _tables():
     return _mapping()["tables"]
 
 
+_MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+_DATE_FORMATS = ("%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d", "%d-%b-%Y", "%d-%b-%y", "%d/%m/%y")
+
+
+def _month_label(d):
+    return f"{_MON[d.month - 1]}-{d.year % 100:02d}"
+
+
+def _as_date(v):
+    """A date / datetime cell, or a date written as text ('24-04-2025') -> date; anything else -> None."""
+    if isinstance(v, _dt.datetime):
+        return v.date()
+    if isinstance(v, _dt.date):
+        return v
+    s = str(v or "").strip()
+    for fmt in _DATE_FORMATS:
+        try:
+            return _dt.datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
 def _canon_cols(tname):
     return LEAD_COLS + list(_tables()[tname]["fields"]) + ["extra"]
 
@@ -221,6 +244,7 @@ def _build_table(ctx, tname, tdef, sheet, rows, table_rows, coverage, mapping, r
         coverage.append(dict(table=sheet, month="*", rows=-1, note="[E701] " + msg))
         return True
     n_by_month, order, current = {}, [], None
+    last_assigned, q_unplaced, q_banners = None, 0, []
     for ridx in range(start, len(rows)):
         r = rows[ridx]
         if r and mpu.is_marker_row(r):
@@ -230,6 +254,9 @@ def _build_table(ctx, tname, tdef, sheet, rows, table_rows, coverage, mapping, r
                 ctx.fail("E703", f"GSTR-2A sheet '{sheet}': the period banner in row {ridx + 1} is not understood ({e}).",
                          sheet=sheet, skipped="every GSTR-2A check", action="Check the file.")
             current = labels_m
+            last_assigned = None
+            if len(labels_m) > 1 and "..".join((labels_m[0], labels_m[-1])) not in q_banners:
+                q_banners.append("..".join((labels_m[0], labels_m[-1])))
             for lbl in labels_m:
                 returns.setdefault(lbl, dict(month=lbl, fy=fy, tax_period=tp, marker_text=str(r[0])))
                 if lbl not in n_by_month:
@@ -246,9 +273,32 @@ def _build_table(ctx, tname, tdef, sheet, rows, table_rows, coverage, mapping, r
             rec[f] = cc.num(v) if spec["type"] == "num" else v
         rec["extra"] = "; ".join(f"{display[i] or get_column_letter(i + 1)}={r[i]}" for i in range(min(len(r), len(display)))
                                  if i not in mapped and not _blank(r[i]))
+        if len(current) > 1:
+            # QUARTERLY banner: a row belongs to ONE month - that of its own invoice / note date (blank date cells follow
+            # the row above); no usable date inside the quarter -> the quarter's last month. (The original copied every
+            # row into all three months.)
+            d = _as_date(rec.get(tdef["date_field"])) if tdef.get("date_field") else None
+            assigned = None
+            if d is not None and _month_label(d) in current:
+                assigned = last_assigned = _month_label(d)
+            elif d is None and _blank(rec.get(tdef.get("date_field"))) and last_assigned in current:
+                assigned = last_assigned
+            else:
+                q_unplaced += 1
+            assigned = assigned or current[-1]
+            rec["months_covered"] = assigned
+            table_rows[canon].append(rec)
+            n_by_month[assigned] += 1
+            continue
         table_rows[canon].append(rec)
         for lbl in current:
             n_by_month[lbl] += 1
+    if q_banners:
+        ctx.issue("W705", "WARNING", sheet, "", ";".join(q_banners),
+                  f"GSTR-2A sheet '{sheet}': quarterly period banner ({', '.join(q_banners)}) - each row is placed in the month of its own "
+                  f"invoice / note date" + (f"; {q_unplaced} row(s) with no usable date inside the quarter were attributed to the quarter's "
+                                            f"last month" if q_unplaced else "") + ". The original copied every row of the quarter into each "
+                  f"of its three months.", "", "Compare a quarterly return at quarter level (all three months together).")
     for lbl in order:
         coverage.append(dict(table=sheet, month=lbl, rows=n_by_month[lbl], note=""))
     for m in mapping:

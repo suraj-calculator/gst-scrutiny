@@ -14,7 +14,7 @@ Missing months are simply skipped, no error.
 """
 from openpyxl import Workbook, load_workbook
 from gst_merge_common import (
-    find_xlsx_files, detect_file_type, einv_period_to_key,
+    find_xlsx_files, detect_file_type, period_key,
     sheet_max_data_row, write_separator, HEADER_FONT, find_sheet,
 )
 
@@ -44,7 +44,7 @@ def main(folder="."):
     for f in einv_files:
         wb = load_workbook(f, data_only=True)
         meta = read_meta(wb)
-        key = einv_period_to_key(meta["tax_period"])
+        key = period_key(meta["tax_period"], meta.get("fy"))     # monthly (042022) or quarterly (Apr-Jun) period
         records.append({"path": f, "wb": wb, "meta": meta, "key": key})
 
     # Group by month (same Tax Period). A month can now have more than one

@@ -206,10 +206,35 @@ def main():
         ok &= check("Non-GST column: canonical reads 'Non-GST Supplies' (30); the original read the Exempted column (20)",
                     new_n == 30.0 and old_n == 20.0, f"old={old_n} new={new_n}")
 
-        # ---- quarterly banner (Apr-Jun) fans out to all three months, same as the original
+        # ---- quarterly banner (Apr-Jun): every row goes to the month of its OWN date (undated tables to the quarter's last
+        #      month) - the original copied the whole quarter into each of its three months, counting it three times.
+        rawm = make_fixture(os.path.join(tmp, "g1_m.xlsx"))                       # same rows, monthly banners (Apr + May)
         rawq = make_fixture(os.path.join(tmp, "g1_q.xlsx"), tp_apr="Apr-Jun")
-        d = compare_all(rawq, ["Apr-24", "May-24", "Jun-24"])
-        ok &= check("quarterly banner: every reader identical for all three months", not d, str(d[:2]))
+        ad.clear_cache()
+        gm = {m: ad.parse_gstr1(rawm, m) for m in ("Apr-24", "May-24")}
+        gq = {m: ad.parse_gstr1(rawq, m) for m in ("Apr-24", "May-24", "Jun-24")}
+        ok &= check("quarterly banner: the three months add up to the monthly file's Apr+May exactly (nothing counted three times)",
+                    abs(sum(g["taxable"] for g in gq.values()) - sum(g["taxable"] for g in gm.values())) < 1e-9 and
+                    sum(len(g["lines"]) for g in gq.values()) == sum(len(g["lines"]) for g in gm.values()),
+                    str({m: g["taxable"] for m, g in gq.items()}))
+        ok &= check("...undated tables (B2CS, HSN...) are in the quarter's last month; the original copied them into every month",
+                    gq["Jun-24"]["taxable"] == 800.0 and len(pr.parse_gstr1(rawq, "Jun-24")["lines"]) == len(pr.parse_gstr1(rawq, "Apr-24")["lines"]) > 0)
+        ok &= check("...and W106 tells the user, per table",
+                    any(i["id"] == "W106" for i in ad.get_data(rawq)["issues"]))
+        hsn_sum = sum(g["hsn_taxable"] for g in gq.values())                 # per month, read before the quarter is registered
+        mpu.set_period_units({"Jun-24": ["Apr-24", "May-24", "Jun-24"]})
+        try:
+            ad.clear_cache()
+            gu = ad.parse_gstr1(rawq, "Jun-24")
+            ok &= check("with the quarter registered as one period, the quarter's label returns the WHOLE quarter",
+                        abs(gu["taxable"] - sum(g["taxable"] for g in gm.values())) < 1e-9 and
+                        len(gu["lines"]) == sum(len(g["lines"]) for g in gm.values()),
+                        f"{gu['taxable']} vs {sum(g['taxable'] for g in gm.values())}")
+            ok &= check("...HSN table (Table 12) is counted once for the quarter, not twice",
+                        hsn_sum > 0 and abs(gu["hsn_taxable"] - hsn_sum) < 1e-9, f"{gu['hsn_taxable']} vs {hsn_sum}")
+        finally:
+            mpu.set_period_units({})
+            ad.clear_cache()
 
         # ---- canonical workbook
         out = ad.write_canonical(ad.build_canonical(raw), os.path.join(tmp, "_canonical"))

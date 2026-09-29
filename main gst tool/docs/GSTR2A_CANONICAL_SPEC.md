@@ -43,7 +43,7 @@ Field names, legacy positions and heading fragments are all in `gstr2a_mapping.j
 
 All source rows under a banner are kept, including rate-lines, `-Total` rows and repeated sub-heading rows; the reader applies
 the original's filters (GSTIN-shaped rows only, then only the `-Total` rollup row per document, with any document lacking one
-reported in `total_row_missing`). A quarterly banner fans out to its three months, as before.
+reported in `total_row_missing`). A quarterly banner no longer fans out: each row goes to the month of its own date (W705); see QUARTERLY_QRMP_SPEC.md.
 
 ## Errors and warnings
 | ID | Sev | Meaning |

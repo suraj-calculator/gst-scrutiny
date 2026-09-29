@@ -20,7 +20,7 @@ period, so a single shared header per sheet is safe to reuse for every block.
 """
 from openpyxl import Workbook
 from gst_merge_common import (
-    find_xlsx_files, detect_file_type, einv_period_to_key,
+    find_xlsx_files, detect_file_type, period_key,
     sheet_max_data_row, write_separator, HEADER_FONT, copy_sheet_full,
     warn_duplicates, load_data_workbook,
 )
@@ -51,7 +51,7 @@ def main(folder="."):
     for f in r2a_files:
         wb = load_data_workbook(f)
         meta = read_meta(wb)
-        key = einv_period_to_key(meta["tax_period"])
+        key = period_key(meta["tax_period"], meta.get("fy"))     # monthly (042022) or quarterly (Apr-Jun) period
         records.append({"path": f, "wb": wb, "meta": meta, "key": key})
 
     records.sort(key=lambda r: r["key"])

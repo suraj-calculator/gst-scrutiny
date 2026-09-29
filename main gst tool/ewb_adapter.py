@@ -374,4 +374,5 @@ def parse_annual_ewb(path):
 def filter_by_month(ewb_rows, month_key):
     """month_key e.g. 'Jan-23' -- matches on EWB date's month (not doc date). Pure in-memory filter, kept
     identical to gst_parsers_returns.filter_by_month (not file-reading, so it never needed converting)."""
-    return [r for r in ewb_rows if r["month"] == month_key]
+    unit = mpu.unit_months(month_key)      # a quarter's anchor label -> all of the quarter's months
+    return [r for r in ewb_rows if r["month"] in unit]

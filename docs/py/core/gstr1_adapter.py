@@ -79,6 +79,22 @@ def _parse_any_date(s):
     return None
 
 
+_MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def _month_label(d):
+    return f"{_MON[d.month - 1]}-{d.year % 100:02d}"
+
+
+def _as_date(v):
+    """A date / datetime cell, or a date written as text -> date; anything else -> None."""
+    if isinstance(v, _dt.datetime):
+        return v.date()
+    if isinstance(v, _dt.date):
+        return v
+    return _parse_any_date(v)
+
+
 def _canon_cols(tname):
     return LEAD_COLS + list(_tables()[tname]["fields"]) + ["extra"]
 
@@ -212,6 +228,7 @@ def _build_table(ctx, tname, tdef, sheet, rows, table_rows, coverage, mapping):
     current = None
     canon = tdef["canon_sheet"]
     fill = {f: [0, 0] for f in fields}
+    last_assigned, quarter_dated_unplaced, quarter_undated, quarter_banners = None, 0, 0, []
     for ridx in range(hdr_idx + 1, len(rows)):
         r = rows[ridx]
         if r and mpu.is_marker_row(r):
@@ -222,6 +239,9 @@ def _build_table(ctx, tname, tdef, sheet, rows, table_rows, coverage, mapping):
                 ctx.issue("E103", "ERROR", sheet, "", "all", table_error[7:], f"every check that reads {sheet}", "")
                 break
             current = labels
+            last_assigned = None
+            if len(labels) > 1 and _label(labels) not in quarter_banners:
+                quarter_banners.append(_label(labels))
             for lbl in labels:
                 if lbl not in n_by_month:
                     n_by_month[lbl] = 0
@@ -246,9 +266,42 @@ def _build_table(ctx, tname, tdef, sheet, rows, table_rows, coverage, mapping):
             rec[f] = cc.num(v) if spec["type"] == "num" else v
         extras = [f"{t}={r[i]}" for i, t in unmapped.items() if i < len(r) and r[i] not in (None, "")]
         rec["extra"] = "; ".join(extras)
+        if len(current) > 1:
+            # QUARTERLY banner (QRMP filer). The original copied every row of the quarter into each of its three
+            # months (the quarter counted three times). A row now belongs to ONE month: the month of its own
+            # invoice / note date (a continuation row of a multi-rate invoice, whose date cell is blank, follows the
+            # invoice above it); a row of a table that carries no dates (B2CS, Table 12 HSN, exempt supplies, the
+            # documents issued) or with no usable date inside the quarter is attributed to the quarter's LAST month.
+            dfield = tdef.get("date_field")
+            assigned = None
+            if dfield:
+                d = _as_date(rec.get(dfield))
+                if d is not None and _month_label(d) in current:
+                    assigned = last_assigned = _month_label(d)
+                elif d is None and rec.get(dfield) in (None, "") and last_assigned in current:
+                    assigned = last_assigned
+                else:
+                    quarter_dated_unplaced += 1
+            else:
+                quarter_undated += 1
+            if assigned is None:
+                assigned = current[-1]
+            rec["period"] = rec["months_covered"] = assigned
+            table_rows[canon].append(rec)
+            n_by_month[assigned] += 1
+            continue
         table_rows[canon].append(rec)
         for lbl in current:
             n_by_month[lbl] += 1
+    if quarter_banners:
+        dfield = tdef.get("date_field")
+        what = (f"each row is placed in the month of its own {dfield.replace('_', ' ')}"
+                + (f"; {quarter_dated_unplaced} row(s) with no usable date inside the quarter were attributed to the quarter's last month" if quarter_dated_unplaced else "")
+                if dfield else "this table carries no dates, so its rows (quarterly totals) are attributed to the quarter's LAST month")
+        ctx.issue("W106", "WARNING", sheet, "", ";".join(quarter_banners),
+                  f"GSTR-1 tab '{sheet}': quarterly return ({', '.join(quarter_banners)}) - {what}. The original copied every row of the quarter into "
+                  f"each of its three months (counting the quarter three times).",
+                  "", "Compare a quarterly return at quarter level (all three months together).")
     if table_error:
         coverage.append(dict(table=sheet, month="*", rows=-1, note=table_error))
     for lbl in months_order:
@@ -388,7 +441,7 @@ def _index(data):
     return dict(meta=meta, tabs=tabs, cov=cov, rows=rows, ok=ok_fields)
 
 
-def _rows_for_month(ix, tab, month):
+def _rows_for_month(ix, tab, month, unit=True):
     """Rows of `tab` under a banner covering `month`; raises what mpu.rows_for_month raised for the raw sheet."""
     info = ix["cov"].get(tab, {"months": [], "error": None})
     if info["error"]:
@@ -398,7 +451,10 @@ def _rows_for_month(ix, tab, month):
     if month not in info["months"]:
         raise mpu.PeriodParseError(f"Month {month!r} not found as a period marker in this sheet. "
                                    f"Months present: {sorted(info['months'])}")
-    return [r for r in ix["rows"].get(tab, []) if month in r["_ml"]]
+    ms = mpu.unit_months(month) if unit else [month]
+    if len(ms) == 1:
+        return [r for r in ix["rows"].get(tab, []) if month in r["_ml"]]
+    return [r for r in ix["rows"].get(tab, []) if any(m in r["_ml"] for m in ms)]     # a quarter: all its months
 
 
 def _f(v):
@@ -549,11 +605,11 @@ def read_gstr1_hsn_all_months(path):
     ix = get_data(path)["_index"]
     cache = ix.setdefault("_hsn", None)
     if cache is not None:
-        return cache
+        return _with_units(cache)
 
     def read_tab(tab, month):
         recs = []
-        for r in _rows_for_month(ix, tab, month):
+        for r in _rows_for_month(ix, tab, month, unit=False):     # the month's OWN rows; units are applied in _with_units
             if not r["_any"]:
                 continue
             recs.append(dict(hsn=_s(r["hsn"]), desc=_s(r["desc"]), uqc=_s(r["uqc"]), qty=_f(r["qty"]),
@@ -584,6 +640,18 @@ def read_gstr1_hsn_all_months(path):
                     continue
         out[month] = recs
     ix["_hsn"] = out
+    return _with_units(out)
+
+
+def _with_units(by_month):
+    """Table 12 rows per month, plus - for a quarter's anchor label (mpu.unit_months) - the rows of all its months, so the
+    anchor answers with the quarter's total. Months are left as they are."""
+    if not mpu.PERIOD_UNITS:
+        return by_month
+    out = dict(by_month)
+    for anchor, ms in mpu.PERIOD_UNITS.items():
+        if any(m in by_month for m in ms):
+            out[anchor] = [r for m in ms for r in by_month.get(m, [])]
     return out
 
 

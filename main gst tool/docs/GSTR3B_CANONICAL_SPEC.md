@@ -54,8 +54,8 @@ appears under D.
 2. A required line missing for a month is now an explicit error for that month, not silent zeros.
 3. Duplicate sheets for one month: the first is used everywhere (the ARN-date reader used to take the last).
 Kept as-is on purpose: `rcm_liability_igst` still holds the 3.1(d) first figure (the taxable value) although its name
-says IGST; it is not used downstream. A quarterly 3B still parses only its first month (`parse_gstr3b`), months 2-3 are
-refused as before.
+says IGST; it is not used downstream. A quarterly 3B is served under the quarter's LAST month only (`parse_gstr3b`; the other two months are refused) and `quarter_units()` lists
+the quarters - see QUARTERLY_QRMP_SPEC.md.
 
 ## Proof (2026-09-21)
 * Reader level, 5 real workbooks (sample taxpayer A 23-24 and 24-25, sample taxpayer B 25-26, another taxpayer 23-24): `parse_gstr3b`,

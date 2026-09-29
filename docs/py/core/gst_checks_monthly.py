@@ -643,7 +643,7 @@ BORDER = Border(*[Side(style="thin", color="BFBFBF")]*4)
 def write_analysis(findings, raw_bundle, outpath):
     wb = openpyxl.Workbook()
     ws = wb.active; ws.title = "Findings"
-    ws.cell(1, 1, f"GST SCRUTINY — ANALYSIS (14 checks) — Period {raw.PERIOD_LABEL}").font = Font(bold=True, size=13, color="1F3864")
+    ws.cell(1, 1, f"GST SCRUTINY — ANALYSIS (14 checks) — Period {mpu.period_title(raw.PERIOD_LABEL)}").font = Font(bold=True, size=13, color="1F3864")
     ws.cell(2, 1, f"GSTIN {getattr(raw,'SELF_GSTIN','')}  |  {getattr(raw,'COMPANY_NAME','') or '(company auto-detected)'}").font = Font(size=9, italic=True)
 
     nflag = sum(1 for f in findings if f.severity == FLAG)

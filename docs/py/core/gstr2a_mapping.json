@@ -5,6 +5,7 @@
   "tables": {
     "b2b": {
       "canon_sheet": "R2A_B2B",
+      "date_field": "invdate",
       "raw_names": ["B2B"],
       "header_text": "GSTIN of supplier",
       "gstin_field": "gstin",
@@ -37,6 +38,7 @@
     },
     "cdnr": {
       "canon_sheet": "R2A_CDNR",
+      "date_field": "note_date",
       "raw_names": ["CDNR", "B2B-CDNR"],
       "header_text": "GSTIN of Supplier",
       "gstin_field": "gstin",
@@ -70,6 +72,7 @@
     },
     "b2ba": {
       "canon_sheet": "R2A_B2BA",
+      "date_field": "invdate",
       "raw_names": ["B2BA"],
       "header_text": "GSTIN of Supplier",
       "gstin_field": "gstin",
@@ -101,6 +104,7 @@
     },
     "cdnra": {
       "canon_sheet": "R2A_CDNRA",
+      "date_field": "note_date",
       "raw_names": ["CDNRA", "B2B-CDNRA"],
       "header_text": "GSTIN of Supplier",
       "gstin_field": "gstin",
@@ -134,6 +138,7 @@
     },
     "isd": {
       "canon_sheet": "R2A_ISD",
+      "date_field": "isd_invdate",
       "raw_names": ["ISD"],
       "header_text": "GSTIN of ISD",
       "gstin_field": "gstin",

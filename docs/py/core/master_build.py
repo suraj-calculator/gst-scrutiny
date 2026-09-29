@@ -902,8 +902,11 @@ def write_master_dashboard(ws, month_results, months_covered, months_gap, rect_p
     ws.cell(1, 1, "MASTER DASHBOARD -- ALL MONTHS + ANNUAL SOURCES, RANKED TOGETHER").font = TITLEF
     ws.cell(2, 1, f"GSTIN {raw.SELF_GSTIN}  |  {raw.COMPANY_NAME}  |  "
                   f"generated {_dt.datetime.now():%Y-%m-%d %H:%M:%S}").font = Font(size=9, italic=True)
+    _q = ("  |  QUARTERLY FILER - each quarter is ONE period, labelled by its last month, compared as a whole: "
+          + "; ".join(f"{a} = {ms[0]}..{ms[-1]}" for a, ms in sorted(mpu.PERIOD_UNITS.items(), key=lambda kv: _month_sort_key(kv[0]))))\
+        if mpu.PERIOD_UNITS else ""
     ws.cell(3, 1, f"FY(s) covered: {', '.join(fys) or 'none'}  |  "
-                  f"Months covered ({len(months_covered)}): {', '.join(months_covered) or 'none'}").font = Font(size=10, bold=True, color="006100")
+                  f"Months covered ({len(months_covered)}): {', '.join(months_covered) or 'none'}{_q}").font = Font(size=10, bold=True, color="006100")
     ws.cell(4, 1, f"Gaps WITHIN the covered span ({len(months_gap)}): {', '.join(months_gap) or 'none'} -- "
                   "a month between the earliest and latest month supplied that has NO GSTR-1+GSTR-3B pair; "
                   "this is NOT the same as 'nothing was supplied for that FY' if the FY itself wasn't in "
@@ -2504,6 +2507,43 @@ def main(folder="."):
     fys_covered = sorted(set(_fy_label_for_month(m) for m in months_covered))
     print(f"FY(s) covered: {fys_covered}")
 
+    # ---- QUARTERLY filer (QRMP): one GSTR-3B covers three months. Each such quarter is analysed as ONE period,
+    #      labelled by its LAST month; the GSTR-1 / E-Invoice / GSTR-2B / e-way-bill readers answer that label with the
+    #      quarter's total (gst_core.PERIOD_UNITS), so a quarterly 3B is compared with the whole quarter's sales and ITC and
+    #      never with a single month. A monthly filer has no units and nothing below changes. ----
+    _covered = set(months_covered)
+    _units = {}
+    _partial = {}
+    _skipped = set()
+    try:
+        import gstr3b_adapter
+        for f in res["gstr3b_files"]:
+            for anchor, ms in gstr3b_adapter.quarter_units(f).items():
+                _lost = [m for m in ms if m not in _covered]
+                ms = [m for m in ms if m in _covered]
+                if anchor in ms and len(ms) > 1:
+                    _units[anchor] = ms
+                elif ms:
+                    _skipped.update(ms)          # the quarter-end month has no GSTR-1: nothing can be compared for this quarter
+                if _lost:
+                    _partial[anchor] = _lost
+                    _what = ("the sheet is marked INCOMPLETE INPUT" if anchor in _units else
+                             "this quarter is SKIPPED (a lone month cannot be compared with a whole quarter's return)")
+                    print(f"[warn] Quarterly GSTR-3B ending {anchor}: no GSTR-1 data for {', '.join(_lost)}. "
+                          f"A sales comparison would show a difference caused by MISSING DATA, not by the taxpayer, so "
+                          f"{_what}. Add the missing GSTR-1 month(s) and run again.")
+    except (ImportError, Exception) as _ex:          # noqa: BLE001 - never stop a run over the unit detection
+        print(f"[warn] Could not check the GSTR-3B for quarterly returns ({_ex}).")
+    mpu.set_period_units(_units)
+    mpu.PARTIAL_UNITS.clear(); mpu.PARTIAL_UNITS.update(_partial)
+    _in_unit = {m for ms in _units.values() for m in ms}
+    run_months = [m for m in months_covered if (m not in _in_unit or m in _units) and m not in _skipped]
+    if _units:
+        print("*** Quarterly GSTR-3B detected (QRMP filer): " + "; ".join(
+            f"{ms[0]}..{ms[-1]} analysed as ONE period (label {a})" for a, ms in sorted(_units.items(), key=lambda kv: _month_sort_key(kv[0])))
+            + ". Every check that involves the GSTR-3B compares the quarter's total sales / ITC with the quarterly return; "
+              "nothing is spread over months. ***")
+
     # ---- filing compliance: read ARN dates ONCE per unique file (not once per
     #      month -- these functions scan the whole workbook each time) ----
     print("Extracting ARN / filing dates for late-fee & interest computation...")
@@ -2515,13 +2555,10 @@ def main(folder="."):
             print("  [filing_compliance]", w)
     for f in res["gstr3b_files"]:
         gstr3b_arn_by_month.update(fc.gstr3b_arn_dates_by_month(f))
-    # QRMP detection: a GSTR-1 marker that fans one marker into 3 months = quarterly filer.
-    # (Approximate signal: if GSTR-1 has fewer distinct ARNs than months, quarterly is likely --
-    # exact detection needs the real marker text's own Tax-Period field, already used inside
-    # gstr1_arn_dates_by_month(); left as monthly-default here since this taxpayer's GSTR-3B is
-    # confirmed one-sheet-per-month = non-QRMP, and QRMP support is otherwise architecturally
-    # ready in filing_compliance.py's due_date_gstr1()/due_date_gstr3b() is_qrmp parameter.)
-    gstr1_is_qrmp = gstr3b_is_qrmp = False
+    # QRMP filers file GSTR-1 and GSTR-3B quarterly, so their due dates are the QRMP ones (GSTR-1: 13th; GSTR-3B: 22nd/24th of
+    # the month after the quarter). Each quarter's anchor is its last month, so the "period start" the due-date helpers
+    # expect is exactly that month. A monthly filer has no units and keeps the monthly dates.
+    gstr1_is_qrmp = gstr3b_is_qrmp = bool(_units)
 
     # ---- Bug 2 pre-pass: FY-wide 4(B)(2) reversal figures, needed for the month-over-month
     #      outlier check that REPLACES the 4(B)(2)-vs-2B-CN comparison for any month/head where
@@ -2586,8 +2623,8 @@ def main(folder="."):
     all_cancelled_einvoices = []
     einv_cancel_col_found_any = False
     run_errors = []
-    for m in months_covered:
-        print(f"Running month {m}...")
+    for m in run_months:
+        print(f"Running {'quarter ending ' if m in _units else 'month '}{m}...")
         files = dict(gstr1=res["gstr1_month_map"].get(m), gstr3b=res["gstr3b_month_map"].get(m),
                      einv=res["einv_month_map"].get(m), gstr2b=res["gstr2b_month_map"].get(m))
         try:
@@ -2614,7 +2651,7 @@ def main(folder="."):
     if run_errors:
         print(f"\n*** {len(run_errors)} month(s) failed and were skipped: {[m for m, _ in run_errors]} ***\n")
 
-    rect_pairs = build_rectification_pairs(month_results, month_g1_lines, months_covered)
+    rect_pairs = build_rectification_pairs(month_results, month_g1_lines, run_months)
 
     print("Building Phase-1 annual reconciliation (graceful if any source is missing)...")
     annual_data = dict(
@@ -2640,7 +2677,7 @@ def main(folder="."):
     print("Running HSN-code-wise + fraud-pattern checks...")
     files_for_hsn = dict(gstr1=res["gstr1_merged"], gstr3b=res["gstr3b_merged"],
                           einv=res["einv_merged"], gstr2b=res["gstr2b_merged"])
-    hsn_findings = hfc.run_all(files_for_hsn, ewb_out_rows, ewb_in_rows, months_covered, annual_data,
+    hsn_findings = hfc.run_all(files_for_hsn, ewb_out_rows, ewb_in_rows, run_months, annual_data,
                                 annual_rows, res["self_gstin"],
                                 hsn_sac_master_override=res.get("hsn_sac_master_file"))
 
@@ -2655,7 +2692,7 @@ def main(folder="."):
     # already read (nil_exempt_taxable is a SUM; R13 needs to know row-count, so re-read the
     # 'exemp' sheet's row presence per month directly here, reusing the same content-based logic).
     exemp_rows_by_month = {}
-    for m, res_m in zip(months_covered, month_results):
+    for m, res_m in zip(run_months, month_results):
         g1 = res_m["comp_raw"]["g1"]
         exemp_rows_by_month[m] = [1] * 0 if g1.get("nil_exempt_taxable") in (None,) else (
             [1] if (g1.get("nil_taxable", 0) or g1.get("exempt_taxable", 0) or g1.get("nongst_taxable", 0)) else [])
@@ -2767,7 +2804,7 @@ def main(folder="."):
     flow_ctx = None
     try:
         flow_ctx = flow.build_context(
-            months_covered, res, month_results, annual_data, ewb_out_rows, ewb_in_rows,
+            run_months, res, month_results, annual_data, ewb_out_rows, ewb_in_rows,
             gstr9, gstr9c, table8a, bs_pl_data, res["self_gstin"],
             fys_covered[0] if len(fys_covered) == 1 else None, r2a_data=r2a_data,
             blocked_credit_master_path=res.get("blocked_itc_master_file"))

@@ -501,6 +501,7 @@ function renderCanonicalBlock(canon) {
     : `${ICONS.check} <p>Converted to the canonical format &mdash; no issues found.</p>`;
   return `
     <div class="result-line${hasIssues ? " warn" : ""}">${okLine}</div>
+    ${(canon.notes || []).map(n => `<div class="result-line">${ICONS.check} <p>${escapeHtml(n)}</p></div>`).join("")}
     <div class="download-row">
       <div>
         <div class="fname">${escapeHtml(canon.canonical_name)}</div>

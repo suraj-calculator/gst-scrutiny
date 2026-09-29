@@ -3,7 +3,7 @@
   "version": "1",
   "tables": {
     "b2b": {
-      "canon_sheet": "B2B_LINES", "raw_names": ["b2b, sez, de_inv"],
+      "canon_sheet": "B2B_LINES", "raw_names": ["b2b, sez, de_inv"], "date_field": "invdate",
       "fields": {
         "gstin":    {"exact": ["GSTIN/UIN of Recipient", "GSTIN/UIN", "Recipient GSTIN"], "type": "raw"},
         "receiver": {"exact": ["Receiver Name"], "type": "raw"},
@@ -25,7 +25,7 @@
       }
     },
     "b2cl": {
-      "canon_sheet": "B2CL_LINES", "raw_names": ["b2cl"],
+      "canon_sheet": "B2CL_LINES", "raw_names": ["b2cl"], "date_field": "invdate",
       "fields": {
         "invno":   {"exact": ["Invoice Number"], "type": "raw"},
         "invdate": {"exact": ["Invoice date"], "type": "raw"},
@@ -40,7 +40,7 @@
       }
     },
     "exp": {
-      "canon_sheet": "EXP_LINES", "raw_names": ["exp"],
+      "canon_sheet": "EXP_LINES", "raw_names": ["exp"], "date_field": "invdate",
       "fields": {
         "exptype":  {"exact": ["Export Type"], "type": "raw"},
         "invno":    {"exact": ["Invoice Number"], "type": "raw"},
@@ -80,7 +80,7 @@
       }
     },
     "cdnr": {
-      "canon_sheet": "CDNR_LINES", "raw_names": ["cdnr"],
+      "canon_sheet": "CDNR_LINES", "raw_names": ["cdnr"], "date_field": "notedate",
       "fields": {
         "gstin":            {"exact": ["GSTIN/UIN of Recipient", "GSTIN/UIN", "Recipient GSTIN"], "type": "raw"},
         "receiver":         {"exact": ["Receiver Name"], "type": "raw"},
@@ -103,7 +103,7 @@
       }
     },
     "cdnur": {
-      "canon_sheet": "CDNUR_LINES", "raw_names": ["cdnur"],
+      "canon_sheet": "CDNUR_LINES", "raw_names": ["cdnur"], "date_field": "notedate",
       "fields": {
         "urtype":   {"exact": ["UR Type"], "type": "raw"},
         "noteno":   {"exact": ["Note Number"], "type": "raw"},
@@ -123,7 +123,7 @@
       }
     },
     "b2ba": {
-      "canon_sheet": "B2BA_LINES", "raw_names": ["b2ba"],
+      "canon_sheet": "B2BA_LINES", "raw_names": ["b2ba"], "date_field": "rev_invdate",
       "fields": {
         "gstin":       {"exact": ["GSTIN/UIN of Recipient"], "type": "raw"},
         "receiver":    {"exact": ["Receiver Name"], "type": "raw"},
@@ -144,7 +144,7 @@
       }
     },
     "cdnra": {
-      "canon_sheet": "CDNRA_LINES", "raw_names": ["cdnra"],
+      "canon_sheet": "CDNRA_LINES", "raw_names": ["cdnra"], "date_field": "rev_notedate",
       "fields": {
         "gstin":            {"exact": ["GSTIN/UIN of Recipient"], "type": "raw"},
         "receiver":         {"exact": ["Receiver Name"], "type": "raw"},

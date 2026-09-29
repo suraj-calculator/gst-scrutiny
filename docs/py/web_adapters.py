@@ -302,8 +302,20 @@ def process_canonical_preview(source, name, data, work_dir):
     issues = [{"id": i["id"], "severity": i["severity"], "message": i["message"]}
               for i in canon_data["issues"] if i["severity"] in ("ERROR", "WARNING")]
     status = dict(canon_data["meta"]).get("status", "OK")
+    notes = []
+    if source == "gstr3b":                  # a quarterly (QRMP) return: say so, and how the scrutiny will treat it
+        try:
+            units = adapter.quarter_units(src_path)
+        except Exception:  # noqa: BLE001 - the note is a courtesy; never fail the upload over it
+            units = {}
+        if units:
+            notes.append(
+                f"Quarterly GSTR-3B detected ({len(units)} quarter{'s' if len(units) != 1 else ''}: "
+                + ", ".join(f"{ms[0]} to {ms[-1]}" for ms in units.values())
+                + "). The scrutiny will compare each quarter's whole sales and ITC (GSTR-1, E-Invoice, GSTR-2B) with that one return "
+                  "- nothing is spread over months. Provide the GSTR-1 for the whole of each quarter (monthly or quarterly GSTR-1 both work).")
     return {"ok": True, "status": status, "source_label": label, "canonical_name": os.path.basename(out_path),
-            "canonical_bytes": _read_bytes(out_path), "issues": issues}
+            "canonical_bytes": _read_bytes(out_path), "issues": issues, "notes": notes}
 
 
 def _render_bs_pl_module(bs_pl_data):

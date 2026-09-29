@@ -234,7 +234,7 @@ def build_canonical(raw_paths):
                               f"recognised ({e}); the sheet is not used.", "that month", "")
                     not_3b.append(f"{os.path.basename(path)}:{sn}")
                     continue
-                month = labels[0]
+                month = labels[-1]      # a quarterly return is anchored at its LAST month (mpu.PERIOD_UNITS); monthly: the month
                 seen_month[month] = seen_month.get(month, 0) + 1
                 used = "Y" if seen_month[month] == 1 else "N"
                 ret = dict(month=month, months_covered=";".join(labels), fy=meta["year"],
@@ -381,6 +381,16 @@ def _index(data):
                 months={m for r in used for m in str(r["months_covered"]).split(";") if m})
 
 
+def quarter_units(path):
+    """{anchor month: [months]} of every QUARTERLY return in the file (empty for a monthly filer)."""
+    out = {}
+    for r in get_data(path)["_index"]["used"]:
+        ms = [m for m in str(r["months_covered"]).split(";") if m]
+        if len(ms) > 1:
+            out[r["month"]] = ms
+    return out
+
+
 def months(path):
     """Set of 'Mon-YY' months (legacy gst_core._gstr3b_months)."""
     return set(get_data(path)["_index"]["months"])
@@ -421,8 +431,8 @@ def month_fields(path, month):
     """Drop-in for gst_checks_hsn_fraud._gstr3b_month_fields(path, month); None if the month is absent."""
     d = get_data(path)
     ix = d["_index"]
-    ret = next((r for r in ix["used"] if month in str(r["months_covered"]).split(";")), None)
-    if ret is None:
+    ret = ix["by_month"].get(month)       # served under the return's own (anchor) month only - never repeated for the
+    if ret is None:                       # other months of a quarterly return
         return None
     lines = ix["lines"].get(ret["month"], {})
 

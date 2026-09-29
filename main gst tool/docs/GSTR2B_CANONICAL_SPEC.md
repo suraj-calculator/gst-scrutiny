@@ -1,5 +1,5 @@
 # GSTR-2B canonical format - Spec v1
-
+claude
 Status: **v1 implemented** (2026-09-20) behind a switch (`gst_config.GSTR2B_USE_CANONICAL`, default off until you flip it). Sections 3-5 below reflect what was built; where the build differs from the first draft it is marked *(as built)*.
 Scope: GSTR-2B only (first source of the "conversion layer"). GSTR-1, GSTR-3B, 2A, E-Invoice, e-way bills, ledgers follow one at a time once this one is proven.
 
@@ -26,7 +26,7 @@ All engine code reaches GSTR-2B through two functions. The new reader must retur
 | `summary_for_month(path, month)` | master_build, gst_checks_monthly | summary dict + `available`, `_summary_available`, `_source`, `_file`, `_lines` (the parse result), `_reason` when unavailable |
 
 - `b2b` / `cdnr` = list of row dicts with the keys in 3.2 / 3.3.
-- Rows are chosen by month: a row belongs to month M if M is covered by the period block it sits under. A **quarterly** block (Apr-Jun) therefore serves all three months - this is today's behaviour and is kept.
+- Rows are chosen by month: a row belongs to month M if M is covered by the period block it sits under. A **quarterly** block (Apr-Jun) serves all three months when read month by month; for a quarterly filer the run reads the quarter as ONE period (its last month's label returns the sum of the three months) - see QUARTERLY_QRMP_SPEC.md.
 - Amended rows (B2BA / CDNRA) are spliced into the month of their own filing period; the superseded original is dropped wherever it sits (today's behaviour). The reader sets `via_amendment = False` on B2B/CDNR rows and `via_amendment = True` plus `original_invno` / `original_note` on spliced amendment rows, exactly as today.
 - `summary["cdnr_skipped_unparseable_this_month"]` (a count) is derived by the reader as the number of CDNR rows in that month whose `filed_period` is blank - today such rows are still included, just counted.
 

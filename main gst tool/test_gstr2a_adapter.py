@@ -99,7 +99,7 @@ def b2b_row(gstin, invno, rate_line=True, total=True, taxable=1000.0, igst=180.0
 
 
 def fixture(path, moved_col=False, bad_heading=False, alias_cdnr=False, drop_total=False, bad_gstin=False,
-            narrow_b2b=False, include_isd=True):
+            narrow_b2b=False, include_isd=True, quarterly_isd=False):
     wb = openpyxl.Workbook()
     wb.active.title = "Read me"
     wb.active.append([None, "Taxpayer's GSTIN", "05AAAAA0001A1Z1", "Tax period", "042025"])
@@ -141,7 +141,7 @@ def fixture(path, moved_col=False, bad_heading=False, alias_cdnr=False, drop_tot
     add_sheet(wb, "CDNRA", "CDNRA", CDNRA_A, CDNRA_G, CDNRA_S, [(banner("042025"), [ca, ca_total])], repeat_sub=True)
     if include_isd:
         isd = ["Yes", G3, "Some ISD", "Invoice", "ISD/1", "10-04-2025", None, None, "ORIG/1", "01-04-2025", 100.0, 50.0, 50.0, 0.0, "Y", None, None]
-        add_sheet(wb, "ISD", "ISD", None, ISD_G, ISD_S, [(banner("Apr-Jun"), [isd])])
+        add_sheet(wb, "ISD", "ISD", None, ISD_G, ISD_S, [(banner("Apr-Jun" if quarterly_isd else "042025"), [isd])])
     wb.save(path)
     return path
 
@@ -191,8 +191,8 @@ def main():
         d = compare(raw)
         ok &= check("standard layout: identical to the original for every table", not d, str(d[:2]))
         r = ad.parse_r2a_excel(raw)
-        ok &= check("available, five tables read, months from the banners (quarterly ISD banner fans out to 3 months)",
-                    r["available"] and r["months_present"] == {"Apr-25", "May-25", "Jun-25"}, str(r["months_present"]))
+        ok &= check("available, five tables read, months from the banners",
+                    r["available"] and r["months_present"] == {"Apr-25", "May-25"}, str(r["months_present"]))
         ok &= check("B2B: only the '-Total' row of each document kept, suffix stripped (INV1, INV2 in April)",
                     sorted(x["invno"] for x in r["b2b"]["Apr-25"]) == ["INV1", "INV2"] and r["b2b"]["Apr-25"][0]["taxable"] == 1000.0)
         ok &= check("invoice type normalised (SEZWP), date normalised to ISO",
@@ -200,12 +200,25 @@ def main():
         ok &= check("B2BA: repeated sub-heading row after the banner does not become data; revised + original numbers read",
                     len(r["b2ba"]["Apr-25"]) == 1 and r["b2ba"]["Apr-25"][0]["invno"] == "INV0A" and r["b2ba"]["Apr-25"][0]["orig_invno"] == "INV0")
         ok &= check("CDNRA and ISD (no real sample in the original) read by the same rules",
-                    r["cdnra"]["Apr-25"][0]["note_no"] == "CN0A" and len(r["isd"]["Jun-25"]) == 1 and r["isd"]["Jun-25"][0]["igst"] == 100.0)
+                    r["cdnra"]["Apr-25"][0]["note_no"] == "CN0A" and len(r["isd"]["Apr-25"]) == 1 and r["isd"]["Apr-25"][0]["igst"] == 100.0)
         ok &= check("empty month block registered as an empty list, not missing", r["b2ba"]["May-25"] == [] and r["cdnr"]["May-25"] == [])
         m = ad.get_data(raw)["mapping"]
         ok &= check("MAPPING_REPORT: every field found at its usual column, confirmed by heading",
                     all(x["status"] == "OK" and x["matched_by"] == "position" and x["confidence"] == "HIGH" for x in m), str([x for x in m if x["matched_by"] != "position"][:1]))
         ok &= check("no warnings on the standard layout", not [i for i in ad.get_data(raw)["issues"] if i["severity"] != "INFO"])
+
+        # ---- QUARTERLY (QRMP) banner: each row goes to the month of its OWN date, never copied into all three months
+        ad.clear_cache()
+        qraw = fixture(os.path.join(tmp, "quarterly_isd.xlsx"), quarterly_isd=True)
+        qr = ad.parse_r2a_excel(qraw)
+        ok &= check("quarterly banner: the ISD row (dated 10-Apr) is in April only; May and June are empty, not copies",
+                    len(qr["isd"]["Apr-25"]) == 1 and qr["isd"].get("May-25", []) == [] and qr["isd"].get("Jun-25", []) == []
+                    and qr["months_present"] == {"Apr-25", "May-25", "Jun-25"}, str({k: len(v) for k, v in qr["isd"].items()}))
+        ok &= check("...the original copied the row into every month (triple count) - the documented difference; W705 says so",
+                    len(dept.parse_r2a_excel(qraw)["isd"]["Jun-25"]) == 1 and
+                    any(i["id"] == "W705" for i in ad.get_data(qraw)["issues"]))
+        ok &= check("...and the quarter's total (Apr+May+Jun) is exactly one copy",
+                    sum(len(qr["isd"].get(m, [])) for m in ("Apr-25", "May-25", "Jun-25")) == 1)
 
         # ---- documented differences / error handling
         ad.clear_cache()

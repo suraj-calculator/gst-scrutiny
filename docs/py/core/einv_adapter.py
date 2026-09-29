@@ -369,7 +369,8 @@ def months(path):
 
 
 def _rows(ix, month):
-    return [r for r in ix["by_month"].get(month, []) if r["_any"]]
+    """The month's rows - or, for a quarter's anchor label (mpu.unit_months), all of the quarter's months."""
+    return [r for m in mpu.unit_months(month) for r in ix["by_month"].get(m, []) if r["_any"]]
 
 
 def _f(v):

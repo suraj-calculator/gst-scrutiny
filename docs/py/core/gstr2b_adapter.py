@@ -811,9 +811,12 @@ _NO_SUMMARY_REASON = ("'ITC Available' sheet not present in this GSTR-2B export 
 
 
 def parse_month(path, month):
-    """Drop-in replacement for gst_parsers_returns.parse_2b_excel(path, month)."""
+    """Drop-in replacement for gst_parsers_returns.parse_2b_excel(path, month). For a quarter's anchor label
+    (mpu.unit_months) the ITC summary is the SUM of the quarter's months and the invoice / note rows those of
+    all its months."""
     data = get_data(path)
     ix = data["_index"]
+    unit = mpu.unit_months(month)
     if month not in ix["months"]:
         raise mpu.PeriodParseError(
             f"Month {month!r} not covered by any period marker in this GSTR-2B. "
@@ -825,36 +828,42 @@ def parse_month(path, month):
             CN_IGST=0.0, CN_CGST=0.0, CN_SGST=0.0, CN_CESS=0.0,
             _qtr_total_mismatch=None, available=False, _reason=_NO_SUMMARY_REASON)
     else:
-        row = ix["itc"].get(month)
-        if row is None:
-            raise mpu.PeriodParseError(
-                f"Month {month!r} not covered by any period marker in the 'ITC Available' sheet. "
-                f"Months covered: {sorted(ix['itc'])}")
+        rows_u = []
+        for um in unit:
+            row = ix["itc"].get(um)
+            if row is None:
+                raise mpu.PeriodParseError(
+                    f"Month {um!r} not covered by any period marker in the 'ITC Available' sheet. "
+                    f"Months covered: {sorted(ix['itc'])}")
+            rows_u.append(row)
+
+        def tot(k):
+            return sum(_f(r[k]) for r in rows_u)
         summary = dict(
-            ITC_all_other_IGST=_f(row["all_other_igst"]), ITC_all_other_CGST=_f(row["all_other_cgst"]),
-            ITC_all_other_SGST=_f(row["all_other_sgst"]), ITC_all_other_CESS=_f(row["all_other_cess"]),
-            ITC_rcm_IGST=_f(row["rcm_igst"]), ITC_rcm_CGST=_f(row["rcm_cgst"]),
-            ITC_rcm_SGST=_f(row["rcm_sgst"]), ITC_rcm_CESS=_f(row["rcm_cess"]),
-            CN_IGST=_f(row["cn_igst"]), CN_CGST=_f(row["cn_cgst"]), CN_SGST=_f(row["cn_sgst"]),
-            CN_CESS=_f(row["cn_cess"]), _qtr_total_mismatch=(row["qtr_total_mismatch"] or None))
+            ITC_all_other_IGST=tot("all_other_igst"), ITC_all_other_CGST=tot("all_other_cgst"),
+            ITC_all_other_SGST=tot("all_other_sgst"), ITC_all_other_CESS=tot("all_other_cess"),
+            ITC_rcm_IGST=tot("rcm_igst"), ITC_rcm_CGST=tot("rcm_cgst"),
+            ITC_rcm_SGST=tot("rcm_sgst"), ITC_rcm_CESS=tot("rcm_cess"),
+            CN_IGST=tot("cn_igst"), CN_CGST=tot("cn_cgst"), CN_SGST=tot("cn_sgst"),
+            CN_CESS=tot("cn_cess"), _qtr_total_mismatch=next((r["qtr_total_mismatch"] for r in rows_u if r["qtr_total_mismatch"]), None))
     b2b = []
     for r in data["b2b"]:
-        if month not in str(r["months_covered"]).split(";"):
+        if not any(um in str(r["months_covered"]).split(";") for um in unit):
             continue
         if (_s(r["gstin"]), _s(r["invno"]).strip().upper()) in ix["sup_inv"]:
             continue
         b2b.append(_b2b_dict(r))
-    b2b.extend(_b2ba_dict(r) for r in data["b2ba"] if r["period"] == month)
+    b2b.extend(_b2ba_dict(r) for r in data["b2ba"] if r["period"] in unit)
     cdnr, skipped = [], 0
     for r in data["cdnr"]:
-        if month not in str(r["months_covered"]).split(";"):
+        if not any(um in str(r["months_covered"]).split(";") for um in unit):
             continue
         if not r["filed_period"]:
             skipped += 1
         if (_s(r["gstin"]), _s(r["note"]).strip().upper()) in ix["sup_note"]:
             continue
         cdnr.append(_cdnr_dict(r))
-    cdnr.extend(_cdnra_dict(r) for r in data["cdnra"] if r["period"] == month)
+    cdnr.extend(_cdnra_dict(r) for r in data["cdnra"] if r["period"] in unit)
     summary.setdefault("available", True)
     summary["cdnr_skipped_unparseable_this_month"] = skipped
     warns = [i["message"] for i in data["issues"] if i["id"] == "W301"]
