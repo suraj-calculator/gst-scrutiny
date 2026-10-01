@@ -742,12 +742,13 @@ import gst_core as mpu
 # from one marker (see merged_period_utils.QUARTER_TO_MONTHS), that taxpayer
 # is QRMP; if GSTR-3B has one sheet per calendar month, that taxpayer reports
 # monthly (QRMP taxpayers still file GSTR-3B quarterly, so 4 sheets/FY, not 12).
-CATEGORY_X_STATES = {  # 22nd -- confirmed CBIC state grouping for QRMP due dates
-    "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12",
-    "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24",
-    "25", "26", "27", "37",
-}  # Chhattisgarh through Maharashtra + Andhra Pradesh(new)/Ladakh -- Category X (West+South+some NE)
-CATEGORY_Y_STATES = {"28", "29", "30", "31", "32", "33", "34", "35", "36", "38"}  # Category Y (East+North)
+# CBIC notification (QRMP): GSTR-3B due on the 22nd for Category X, on the 24th for Category Y.
+# Category X = Chhattisgarh, Madhya Pradesh, Gujarat, Maharashtra, Karnataka, Goa, Kerala, Tamil Nadu, Telangana, Andhra Pradesh and
+#   the UTs of Dadra & Nagar Haveli and Daman & Diu, Puducherry, Andaman & Nicobar, Lakshadweep (GST state codes below).
+# Category Y = every other State / UT (J&K, Himachal, Punjab, Chandigarh, Uttarakhand, Haryana, Delhi, Rajasthan, UP, Bihar, the
+#   North-East, West Bengal, Jharkhand, Odisha, Ladakh ...).
+CATEGORY_X_STATES = {"22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36", "37"}
+CATEGORY_Y_STATES = {f"{i:02d}" for i in range(1, 39)} - CATEGORY_X_STATES
 
 LATE_FEE_PER_DAY_NORMAL = 25.0    # Rs 25 CGST + Rs 25 SGST = Rs 50/day total, per Sec 47
 LATE_FEE_PER_DAY_NIL = 10.0       # Rs 10 CGST + Rs 10 SGST = Rs 20/day total, nil return
@@ -856,6 +857,9 @@ def gstr1_arn_dates_by_month(gstr1_path):
     that sheet's own 'Tax Period' field (if present) identifies -- otherwise
     returns it under a special '_readme_fallback' key with a clear note,
     rather than guessing which month it belongs to."""
+    if mpu.use_canonical_1(gstr1_path):
+        import gstr1_adapter
+        return gstr1_adapter.arn_dates_by_month(gstr1_path)
     out = {}
     warnings = []
     wb = openpyxl.load_workbook(gstr1_path, data_only=True)
@@ -929,6 +933,9 @@ def gstr3b_arn_dates_by_month(gstr3b_path):
     """Return {month_label: {'arn': str|None, 'date': date|None}}. GSTR-3B is
     one SHEET per month, and each sheet already carries its own 'Date of ARN'
     key/value row -- genuinely per-month, no fallback needed."""
+    if mpu.use_canonical_3b(gstr3b_path):
+        import gstr3b_adapter
+        return gstr3b_adapter.arn_dates_by_month(gstr3b_path)
     out = {}
     wb = openpyxl.load_workbook(gstr3b_path, data_only=True)
     for sn in wb.sheetnames:

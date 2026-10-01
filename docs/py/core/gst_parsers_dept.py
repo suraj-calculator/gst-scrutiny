@@ -101,6 +101,9 @@ def parse_cash_or_liability_ledger(path, kind):
     shared code path; each kind's offsets are explicit below, verified against real exports.
     Returns dict(opening={...}, transactions=[...],
     monthly_by_tax_period={period: {...totals...}}, monthly_by_txn_date={period: {...}})."""
+    if mpu.use_canonical_ledger(path):
+        import ledger_adapter
+        return ledger_adapter.parse_cash_or_liability_ledger(path, kind)
     with open(path, newline="", encoding="utf-8-sig") as f:
         rows = list(csv.reader(f))
 
@@ -198,6 +201,9 @@ def parse_cash_or_liability_ledger(path, kind):
 # CREDIT LEDGER  (different layout: 1 Credit/Debit block + 1 Balance block)
 # ======================================================================
 def parse_credit_ledger(path):
+    if mpu.use_canonical_ledger(path):
+        import ledger_adapter
+        return ledger_adapter.parse_credit_ledger(path)
     with open(path, newline="", encoding="utf-8-sig") as f:
         rows = list(csv.reader(f))
     # cols: 0 Sr.No,1 Date,2 Reference No.,3 Tax Period,4 Description,5 Transaction Type,
@@ -248,6 +254,9 @@ def parse_credit_ledger(path):
 # PORTAL "Tax liability and ITC comparison" report (Excel, Comparison Summary sheet)
 # ======================================================================
 def parse_portal_comparison(path):
+    if mpu.use_canonical_portal(path):
+        import portal_adapter
+        return portal_adapter.parse_portal_comparison(path)
     wb = openpyxl.load_workbook(path, data_only=True)
     if "Comparison Summary" not in wb.sheetnames:
         return {}
@@ -383,6 +392,9 @@ def parse_gstr9(path):
     Table 6/7/8's full ITC breakdown, and the Part-I filing ARN/date.
     available=False (with reason) if the file is absent or unreadable -- NEVER
     raises. A field genuinely absent from this return stays None, never guessed."""
+    if path and os.path.exists(path) and mpu.use_canonical_r9(path):
+        import gstr9_adapter
+        return gstr9_adapter.parse_gstr9(path)
     out = dict(available=False, reason=None, is_system_draft=None,
                 fy=None, gstin=None, legal_name=None,
                 table4_b2b_taxable=None, table4_b2b_igst=None, table4_b2b_cgst=None, table4_b2b_sgst=None,
@@ -579,6 +591,9 @@ def parse_gstr9c(path):
     carry these as free text with the exact rupee amount named), which is a genuine
     exact-tie-out opportunity this PDF-era scrape never had access to. Same
     graceful-degrade contract as parse_gstr9()."""
+    if path and os.path.exists(path) and mpu.use_canonical_r9(path):
+        import gstr9_adapter
+        return gstr9_adapter.parse_gstr9c(path)
     out = dict(available=False, reason=None, fy=None, gstin=None, legal_name=None,
                 arn=None, arn_date=None,
                 turnover_audited_bs=None, turnover_after_adjustments=None,
@@ -748,6 +763,9 @@ def parse_table_8a(path):
     have different column counts for the same sheet (see _t8a_header_map's docstring).
     The row-validity test (GSTIN-shaped token) is applied at whichever column the
     GSTIN was actually found in, not a hardcoded column B."""
+    if path and os.path.exists(path) and mpu.use_canonical_t8a(path):
+        import table8a_adapter
+        return table8a_adapter.parse_table_8a(path)
     out = dict(available=False, reason=None, b2b=[], cdnr=[], totals={})
     if not path or not os.path.exists(path):
         out["reason"] = "Table 8A not supplied for this taxpayer/FY."
@@ -1008,6 +1026,9 @@ def _bxl_list_table(ws, field_map, name_frag_gstin="gstin"):
 
 
 def parse_bo_profile(path):
+    if path and os.path.exists(path) and mpu.use_canonical_bo(path):
+        import boprofile_adapter
+        return boprofile_adapter.parse_bo_profile(path)
     out = dict(
         self_gstin=None, legal_name=None, trade_name=None, demographic={},
         financial_by_fy={}, bifa_by_fy={}, itc_passed_by_fy={}, itc_received_by_fy={},
@@ -1417,6 +1438,9 @@ def parse_r2a_excel(path):
 
     Every downstream G-series check treats available=False as an explicit
     reason to SKIP, never as zero data."""
+    if path and os.path.exists(path) and mpu.use_canonical_r2a(path):
+        import gstr2a_adapter
+        return gstr2a_adapter.parse_r2a_excel(path)
     out = dict(available=False, reason=None, months_present=set(),
                b2b={}, b2ba={}, cdnr={}, cdnra={}, isd={},
                total_row_missing={}, malformed_gstin=[])

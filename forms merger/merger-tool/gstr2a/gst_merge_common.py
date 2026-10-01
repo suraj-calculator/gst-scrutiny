@@ -86,8 +86,12 @@ def fy_start_year(fy_string):
 
 
 def month_key(month_name):
-    # Quarterly tax periods look like "Apr-Jun" / "Jan-Mar" -> use the start month
+    # Quarterly tax periods look like "Apr-Jun" / "Jan - Mar" / "Quarter 4" / "Q4" -> use the start month
     raw = str(month_name).strip()
+    import re as _re
+    q = _re.fullmatch(r"(?:quarter|qtr|q)\s*-?\s*([1-4])(?:\s*\(.*\))?", raw, flags=_re.IGNORECASE)
+    if q:
+        return (1, 4, 7, 10)[int(q.group(1)) - 1]
     first_token = raw.split("-")[0].strip().lower()[:9]
     for k, v in MONTH_ORDER_IN_FY.items():
         if first_token.startswith(k) or k.startswith(first_token):
@@ -102,6 +106,19 @@ def einv_period_to_key(mmyyyy):
     if month >= 4:
         return (year, month - 3)
     return (year - 1, month + 9)
+
+
+def period_key(tax_period, fy=None):
+    """Sort key (fy_start_year, order_in_fy) for a file's Tax Period, monthly OR quarterly:
+    numeric MMYYYY ('042022') as before; otherwise ('Apr-Jun', 'Jan - Mar', 'Quarter 4', a month
+    name ...) from the file's own Financial Year + the period's first month."""
+    s = str(tax_period).strip()
+    if s.isdigit() and len(s) == 6:
+        return einv_period_to_key(s)
+    if not fy:
+        raise ValueError(f"Tax Period {tax_period!r} is not a numeric MMYYYY period and the file states no Financial Year, "
+                         f"so its position in the year cannot be determined.")
+    return (fy_start_year(fy), month_key(s))
 
 
 def warn_duplicates(records):

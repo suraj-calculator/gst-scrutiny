@@ -29,6 +29,29 @@ const PY_FILES = [
   "core/gst_checks_monthly.py",
   "core/gst_config.py",
   "core/gst_core.py",
+  "core/canonical_common.py",
+  "core/einv_adapter.py",
+  "core/einv_mapping.json",
+  "core/ewb_adapter.py",
+  "core/ewb_mapping.json",
+  "core/ledger_adapter.py",
+  "core/ledger_mapping.json",
+  "core/table8a_adapter.py",
+  "core/table8a_mapping.json",
+  "core/boprofile_adapter.py",
+  "core/boprofile_mapping.json",
+  "core/gstr9_adapter.py",
+  "core/gstr9_mapping.json",
+  "core/portal_adapter.py",
+  "core/portal_mapping.json",
+  "core/gstr1_adapter.py",
+  "core/gstr1_mapping.json",
+  "core/gstr2a_adapter.py",
+  "core/gstr2a_mapping.json",
+  "core/gstr2b_adapter.py",
+  "core/gstr2b_mapping.json",
+  "core/gstr3b_adapter.py",
+  "core/gstr3b_mapping.json",
   "core/gst_machinery_scan.py",
   "core/gst_parsers_dept.py",
   "core/gst_parsers_returns.py",
@@ -128,6 +151,13 @@ result
 `, { _files: filePairs, _kind: kind, _work_dir: `/work/merge_${kind}_${++_callSeq}` });
 }
 
+async function callCanonicalPreview(source, name, data) {
+  return await runPy(`
+result = web_adapters.process_canonical_preview(_source, _name, bytes(_data), _work_dir)
+result
+`, { _source: source, _name: name, _data: data, _work_dir: `/work/canon_${source}_${++_callSeq}` });
+}
+
 async function callGstr3b(filePairs) {
   return await runPy(`
 files = [(n, bytes(d)) for n, d in _files]
@@ -191,6 +221,7 @@ async function handleCall(msg) {
     let result;
     if (msg.adapter === "ewb") result = await callEwb(msg.args.direction, msg.args.filePairs);
     else if (msg.adapter === "merge") result = await callMerge(msg.args.mergeKind, msg.args.filePairs);
+    else if (msg.adapter === "canonical_preview") result = await callCanonicalPreview(msg.args.source, msg.args.name, msg.args.data);
     else if (msg.adapter === "gstr2b") result = await callGstr2b(msg.args.filePairs);
     else if (msg.adapter === "gstr3b") result = await callGstr3b(msg.args.filePairs);
     else if (msg.adapter === "full_scrutiny") result = await callFullScrutiny(msg.args.filePairs, msg.args.bsPlData);

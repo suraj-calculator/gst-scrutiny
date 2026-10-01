@@ -1,0 +1,389 @@
+{
+ "_about": "GSTR-9 / GSTR-9C canonical layer (spec: docs/GSTR9_CANONICAL_SPEC.md). Both are the government's own Excel export: one sheet per Item / Part (names truncated to 31 characters, so a sheet is found by the leading words listed under 'sheets'; the first sheet whose name starts with any of them). Inside a sheet the original located every figure by its ROW LABEL (the text in column B - or column A for GSTR-9 Part I - must contain all the 'frags', case-insensitive, within the first 60 rows; 'occurrence' picks the n-th such row) and then took the numbers from fixed columns of that row (Taxable value / Central / State / Integrated / Cess, or Payable / Paid, depending on the Item). The canonical FACTS sheet keeps, per fact, the matched row's label, source sheet and row number and the numbers of its first eight columns (c0..c7); the reader takes the same columns the original did. 'kv' = the Part I label / value rows (rules: 'startswith' + 'contains' on the label for GSTR-9, exact label 'equals' for GSTR-9C); 'lists' = 'letters' (rows whose first cell is one of the letters, numbers from columns C and D - the Item 19 late-fee rows) or 'reasons' (the auditor's typed reason lines: column C text on rows whose first cell is alphabetic). 'note_if_missing' is informational only.",
+ "version": "1",
+ "forms": {
+  "gstr9": {
+   "label": "GSTR-9",
+   "canon_prefix": "GSTR9",
+   "sheets": {
+    "part1": [
+     "Part I - Basic Details"
+    ],
+    "item4": [
+     "Item 4 - Advances"
+    ],
+    "item5": [
+     "Item 5 - Outward Supplies"
+    ],
+    "item6": [
+     "Item 6 - ITC Availed"
+    ],
+    "item7": [
+     "Item 7 - ITC Reversed"
+    ],
+    "item8": [
+     "Item 8 - Other ITC"
+    ],
+    "item9": [
+     "Item 9 - Tax Paid"
+    ],
+    "part5": [
+     "Part V - Transactions Declared"
+    ],
+    "item19": [
+     "Item 19 - Late Fee"
+    ]
+   },
+   "kv": {
+    "sheet": "part1",
+    "label_col": 0,
+    "value_col": 1,
+    "rules": [
+     [
+      "fy",
+      {
+       "startswith": "1.",
+       "contains": "financial year"
+      }
+     ],
+     [
+      "gstin",
+      {
+       "startswith": "2.",
+       "contains": "gstin"
+      }
+     ],
+     [
+      "legal_name",
+      {
+       "startswith": "3(a)"
+      }
+     ],
+     [
+      "arn",
+      {
+       "startswith": "3(c)"
+      }
+     ],
+     [
+      "date_of_filing",
+      {
+       "startswith": "3(d)"
+      }
+     ]
+    ]
+   },
+   "facts": {
+    "t4_b2b": {
+     "sheet": "item4",
+     "frags": [
+      "supplies made to registered persons"
+     ]
+    },
+    "t4_cn": {
+     "sheet": "item4",
+     "frags": [
+      "credit notes issued in respect"
+     ]
+    },
+    "t4_rcm": {
+     "sheet": "item4",
+     "frags": [
+      "reverse charge basis"
+     ]
+    },
+    "t4_net": {
+     "sheet": "item4",
+     "frags": [
+      "tax is to be paid (h + m)"
+     ]
+    },
+    "t5_zero_rated": {
+     "sheet": "item5",
+     "frags": [
+      "zero rated supply (export) without payment"
+     ]
+    },
+    "t5_sez": {
+     "sheet": "item5",
+     "frags": [
+      "supply to sezs without payment"
+     ]
+    },
+    "t5_exempted": {
+     "sheet": "item5",
+     "frags": [
+      "exempted"
+     ]
+    },
+    "t5_nil_rated": {
+     "sheet": "item5",
+     "frags": [
+      "nil rated"
+     ]
+    },
+    "t5_nongst": {
+     "sheet": "item5",
+     "frags": [
+      "non-gst supply"
+     ]
+    },
+    "t6a": {
+     "sheet": "item6",
+     "frags": [
+      "total amount of input tax credit availed through form gstr-3b"
+     ]
+    },
+    "t6_total": {
+     "sheet": "item6",
+     "frags": [
+      "total itc availed"
+     ]
+    },
+    "t7_total": {
+     "sheet": "item7",
+     "frags": [
+      "total itc reversed"
+     ]
+    },
+    "t8_2b": {
+     "sheet": "item8",
+     "frags": [
+      "itc as per gstr-2b"
+     ]
+    },
+    "t8_6b6h": {
+     "sheet": "item8",
+     "frags": [
+      "itc as per sum total of 6(b)"
+     ]
+    },
+    "t8_diff": {
+     "sheet": "item8",
+     "frags": [
+      "difference [a-(b+c)]"
+     ]
+    },
+    "t9_igst": {
+     "sheet": "item9",
+     "frags": [
+      "integrated tax"
+     ]
+    },
+    "t9_cgst": {
+     "sheet": "item9",
+     "frags": [
+      "central tax"
+     ]
+    },
+    "t9_sgst": {
+     "sheet": "item9",
+     "frags": [
+      "state/ut tax"
+     ]
+    },
+    "t9_interest": {
+     "sheet": "item9",
+     "frags": [
+      "interest"
+     ]
+    },
+    "t9_latefee": {
+     "sheet": "item9",
+     "frags": [
+      "late fee"
+     ]
+    },
+    "t13": {
+     "sheet": "part5",
+     "frags": [
+      "itc availed for the previous financial year"
+     ]
+    },
+    "t12": {
+     "sheet": "part5",
+     "frags": [
+      "reversal of itc availed during previous financial year"
+     ]
+    }
+   },
+   "lists": {
+    "late_fee_19": {
+     "sheet": "item19",
+     "mode": "letters",
+     "letters": [
+      "A",
+      "B"
+     ]
+    }
+   }
+  },
+  "gstr9c": {
+   "label": "GSTR-9C",
+   "canon_prefix": "GSTR9C",
+   "sheets": {
+    "part1": [
+     "Part I - Basic Details"
+    ],
+    "item5": [
+     "Item 5 - Reconciliation of Gros"
+    ],
+    "item6": [
+     "Item 6 - Reasons for Turnover"
+    ],
+    "item7": [
+     "Item 7 - Reconciliation of Taxa"
+    ],
+    "item8": [
+     "Item 8 - Reasons for Taxable"
+    ],
+    "item9": [
+     "Item 9 - Rate-wise Tax Liabilit"
+    ],
+    "item12": [
+     "Item 12 - Reconciliation of Net"
+    ],
+    "item13": [
+     "Item 13 - Reasons for Un-reconc"
+    ]
+   },
+   "kv": {
+    "sheet": "part1",
+    "label_col": 1,
+    "value_col": 2,
+    "rules": [
+     [
+      "fy",
+      {
+       "equals": "financial year"
+      }
+     ],
+     [
+      "gstin",
+      {
+       "equals": "gstin"
+      }
+     ],
+     [
+      "legal_name",
+      {
+       "equals": "legal name"
+      }
+     ],
+     [
+      "arn",
+      {
+       "equals": "arn"
+      }
+     ],
+     [
+      "arn_date",
+      {
+       "equals": "arn date"
+      }
+     ]
+    ]
+   },
+   "facts": {
+    "c5_audited": {
+     "sheet": "item5",
+     "frags": [
+      "turnover (including exports) as per audited"
+     ]
+    },
+    "c5_after": {
+     "sheet": "item5",
+     "frags": [
+      "annual turnover after adjustments as above"
+     ]
+    },
+    "c5_declared": {
+     "sheet": "item5",
+     "frags": [
+      "turnover as declared in annual return"
+     ]
+    },
+    "c5_unrec": {
+     "sheet": "item5",
+     "frags": [
+      "un-reconciled turnover"
+     ]
+    },
+    "c7_taxable_adj": {
+     "sheet": "item7",
+     "frags": [
+      "taxable turnover as per adjustments above"
+     ]
+    },
+    "c7_exempt": {
+     "sheet": "item7",
+     "frags": [
+      "value of exempted, nil rated, non-gst supplies"
+     ]
+    },
+    "c7_declared": {
+     "sheet": "item7",
+     "frags": [
+      "taxable turnover as per liability declared"
+     ]
+    },
+    "c9_payable": {
+     "sheet": "item9",
+     "frags": [
+      "total amount to be paid as per tables above"
+     ]
+    },
+    "c9_paid": {
+     "sheet": "item9",
+     "frags": [
+      "total amount paid as declared in annual return"
+     ]
+    },
+    "c12_books": {
+     "sheet": "item12",
+     "frags": [
+      "itc availed as per audited annual financial statement"
+     ]
+    },
+    "c12_declared": {
+     "sheet": "item12",
+     "frags": [
+      "itc claimed in annual return"
+     ]
+    },
+    "c12_unrec": {
+     "sheet": "item12",
+     "frags": [
+      "un-reconciled itc"
+     ]
+    },
+    "c12_earlier": {
+     "sheet": "item12",
+     "frags": [
+      "itc booked in earlier financial years claimed"
+     ]
+    },
+    "c12_later": {
+     "sheet": "item12",
+     "frags": [
+      "itc booked in current financial year to be claimed"
+     ]
+    }
+   },
+   "lists": {
+    "turnover_diff_reasons": {
+     "sheet": "item6",
+     "mode": "reasons"
+    },
+    "taxable_turnover_diff_reasons": {
+     "sheet": "item8",
+     "mode": "reasons"
+    },
+    "itc_diff_reasons": {
+     "sheet": "item13",
+     "mode": "reasons"
+    }
+   }
+  }
+ }
+}

@@ -60,6 +60,35 @@ GSTR2B_LINE_ITEM_SHEETS = {
 }
 
 
+# The full export's summary sheets. A workbook that has these but has LOST its 'Read me'
+# sheet (deleted, or dropped by a merge/convert step) is still a GSTR-2B.
+GSTR2B_SUMMARY_SHEETS = {"ITC Available", "ITC not available", "ITC Rejected"}
+
+_OTHER_FORM_TITLE_RE = re.compile(r"GSTR[\s-]*(2A|8A|1|3B)\b", re.I)
+
+
+def _title_is_not_other_form(path):
+    """True unless the form title in the first rows of the first line-item sheet says this is
+    a different return (GSTR-2A / 8A / 1 / 3B) -- guards the no-'Read me' shape rule above
+    against mislabelling a 2A or Table 8A file (both share B2B/B2BA sheet names)."""
+    try:
+        wb = load_workbook(path, read_only=True, data_only=True)
+    except Exception:
+        return False
+    try:
+        for sn in ("B2B", "B2B-CDNR", "B2BA"):
+            if sn not in wb.sheetnames:
+                continue
+            for row in wb[sn].iter_rows(min_row=1, max_row=4, values_only=True):
+                for c in row:
+                    if c and _OTHER_FORM_TITLE_RE.search(str(c)):
+                        return False
+            return True
+    finally:
+        wb.close()
+    return True
+
+
 def detect_file_type(path):
     """Return 'EINV', 'GSTR1', 'GSTR3B', 'GSTR2B', 'GSTR2B_DOCWISE', or None
     based on sheet-name signature."""
@@ -77,7 +106,8 @@ def detect_file_type(path):
         return "GSTR1"
     if "Read me" in names and "b2b, sez, de" in names:
         return "EINV"
-    if names and "Read me" not in names and names.issubset(GSTR2B_LINE_ITEM_SHEETS):
+    if names and "Read me" not in names and names.issubset(GSTR2B_LINE_ITEM_SHEETS | GSTR2B_SUMMARY_SHEETS) \
+            and names & {"B2B", "B2B-CDNR"} and _title_is_not_other_form(path):
         return "GSTR2B_DOCWISE"
     return None
 
@@ -312,6 +342,41 @@ def meta_from_filename(path):
         "legal_name": None,
         "generated_on": f"{gd}/{gm}/{gy}",
     }
+
+
+_BANNER_FY_RE = re.compile(r"Financial Year:\s*(\d{4}\s*-\s*\d{2,4})")
+_BANNER_TP_RE = re.compile(r"Tax Period:\s*([^|]+?)\s*(?:\||$)")
+_BANNER_GEN_RE = re.compile(r"Date of Generation:\s*(\S+)")
+
+
+def banner_periods(wb):
+    """Periods stated INSIDE the workbook, as an ordered {(fy, tax_period, generated_on): n}
+    where n is how many banner rows carry it. Banners are the 'Financial Year: .. | Tax
+    Period: .. | Date of Generation: ..' separator rows this merge tool itself writes above
+    every period's block, so a previously-merged workbook always has them.
+
+    A RAW per-period portal download has none (its data starts straight after the header) --
+    for those this returns {} and the period must come from 'Read me' or the filename.
+    Scans the first line-item sheet found; only banner text is trusted, never invoice dates
+    (an invoice can legitimately be reported in a later month's 2B than its own date)."""
+    for sn in ("B2B", "B2B-CDNR", "B2BA", "B2B-CDNRA", "ITC Available"):
+        if sn not in wb.sheetnames:
+            continue
+        found = {}
+        for (v,) in wb[sn].iter_rows(min_col=1, max_col=1, values_only=True):
+            if not isinstance(v, str) or "Tax Period:" not in v:
+                continue
+            fy, tp, gen = _BANNER_FY_RE.search(v), _BANNER_TP_RE.search(v), _BANNER_GEN_RE.search(v)
+            if not (fy and tp):
+                continue
+            fy, tp = fy.group(1).replace(" ", ""), tp.group(1).strip()
+            if not (looks_like_fy(fy) and looks_like_tax_period(tp)):
+                continue
+            key = (fy, tp, gen.group(1) if gen else "N/A")
+            found[key] = found.get(key, 0) + 1
+        if found:
+            return found
+    return {}
 
 
 def looks_like_fy(v):

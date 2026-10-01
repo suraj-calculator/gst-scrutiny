@@ -122,6 +122,9 @@ def read_gstr1_b2b_ff(path, month):
     carries a 12% line and an 18% line)."""
     if not path or not os.path.exists(path):
         return []
+    if mpu.use_canonical_1(path):
+        import gstr1_adapter
+        return gstr1_adapter.read_gstr1_b2b_ff(path, month)
     wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
     if "b2b, sez, de_inv" not in wb.sheetnames:
         return []
@@ -163,6 +166,9 @@ def read_gstr1_b2c(path, month):
     if not path or not os.path.exists(path):
         res["available"] = False
         return res
+    if mpu.use_canonical_1(path):
+        import gstr1_adapter
+        return gstr1_adapter.read_gstr1_b2c(path, month)
     wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
     for sheet, pfx in (("b2cs", "b2cs"), ("b2cl", "b2cl")):
         if sheet not in wb.sheetnames:

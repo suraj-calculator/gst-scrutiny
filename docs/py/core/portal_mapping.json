@@ -1,0 +1,18 @@
+{
+  "_about": "Portal 'Tax liability and ITC comparison' canonical layer (spec: docs/PORTAL_COMPARISON_CANONICAL_SPEC.md). The engine reads only the 'Comparison Summary' sheet: a title block (GSTIN / Legal name / Financial Year), a two- or three-row heading (row with 'Tax Period' + a group heading per block: tax liability, ITC excluding reversal, ITC considering reversal - and a sub-heading row below) and one row per tax period ('Apr-25'). The original took every figure from a FIXED column ('pos'). The converter also reads the headings: a field's column must have the 'group' fragments in the group heading above it (a group heading spans its block) and the 'sub_has' fragments (and none of 'sub_none'; and none of 'group_none' in the group heading) in its sub-heading (compared after lower-casing and stripping non-alphanumerics). A field is taken from 'pos' if its heading matches; else from the one other unused column that matches (warning W1402); else from 'pos' as the original did (warning W1403). 'type': 'num' = number (blank = 0), 'num_or_none' = number, or blank when the cell is blank (the 'considering reversal' block is not in every export). 'required': true = the file is rejected (E1403) if the column cannot be located at all.",
+  "version": "1",
+  "sheet": "Comparison Summary",
+  "fields": {
+    "gstr1_liability": {"pos": 1, "group": ["taxliability"], "sub_has": ["gstr1"], "type": "num", "required": true},
+    "gstr3b_liability": {"pos": 2, "group": ["taxliability"], "sub_has": ["gstr3b"], "type": "num", "required": true},
+    "diff_liability": {"pos": 3, "group": ["taxliability"], "sub_has": ["shortfall"], "type": "num", "sub_none": ["cumulative"], "required": true},
+    "cum_diff_liability": {"pos": 4, "group": ["taxliability"], "sub_has": ["cumulative"], "type": "num", "sub_none": ["percentage"], "required": true},
+    "itc_3b_unadj": {"pos": 6, "group": ["excluding"], "group_none": ["considering"], "sub_has": ["gstr3b"], "type": "num", "required": true},
+    "itc_2b": {"pos": 7, "group": ["excluding"], "group_none": ["considering"], "sub_has": ["gstr2b"], "type": "num", "required": true},
+    "diff_itc_unadj": {"pos": 8, "group": ["excluding"], "group_none": ["considering"], "sub_has": ["shortfall"], "type": "num", "sub_none": ["cumulative"], "required": true},
+    "cum_diff_itc_unadj": {"pos": 9, "group": ["excluding"], "group_none": ["considering"], "sub_has": ["cumulative"], "type": "num", "sub_none": ["percentage"], "required": true},
+    "itc_3b_adj": {"pos": 11, "group": ["considering"], "sub_has": ["gstr3b"], "type": "num_or_none"},
+    "diff_itc_adj": {"pos": 12, "group": ["considering"], "sub_has": ["shortfall"], "type": "num_or_none", "sub_none": ["cumulative"]},
+    "cum_diff_itc_adj": {"pos": 13, "group": ["considering"], "sub_has": ["cumulative"], "type": "num_or_none", "sub_none": ["percentage"]}
+  }
+}

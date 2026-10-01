@@ -1,0 +1,51 @@
+{
+  "_about": "Table 8A canonical layer - which raw sheet feeds which canonical table and how each field's column is found (spec: docs/TABLE8A_CANONICAL_SPEC.md). The government Table 8A export has a title, a two-row heading (a merged group row and a sub-heading row directly below the row containing 'GSTIN of supplier') and one row per invoice / note. The number of columns differs between exports, so - exactly as the original reader did - every column is located by heading: the label of a column is its sub-heading if there is one, else its group heading; a field's column is the FIRST column whose label contains ALL the fragments of the first alternative in 'match' that hits (case-insensitive, fragments are plain substrings). 'type': 'num' = number (blank = 0), 'raw' = kept as in the source (text is stripped by the reader). 'required': true = the sheet is unusable (reported in the reason, as before) if it cannot be found. The credit-note sheet is 'CDNR', or the newer 'B2B-CDNR' if that is what the export has.",
+  "version": "1",
+  "tables": {
+    "b2b": {
+      "raw_names": ["B2B"],
+      "canon_sheet": "T8A_B2B",
+      "fields": {
+        "period": {"match": [["period"]], "type": "raw"},
+        "gstin": {"match": [["gstin of supplier"]], "type": "raw", "required": true},
+        "supplier": {"match": [["trade"], ["legal name"]], "type": "raw"},
+        "invno": {"match": [["invoice number"]], "type": "raw"},
+        "invtype": {"match": [["invoice type"]], "type": "raw"},
+        "invdate": {"match": [["invoice date"]], "type": "raw"},
+        "invval": {"match": [["invoice value"]], "type": "num"},
+        "pos": {"match": [["place of supply"]], "type": "raw"},
+        "rcm": {"match": [["reverse charge"]], "type": "raw"},
+        "rate": {"match": [["rate"]], "type": "num"},
+        "taxable": {"match": [["taxable value"]], "type": "num"},
+        "igst": {"match": [["integrated tax"]], "type": "num"},
+        "cgst": {"match": [["central tax"]], "type": "num"},
+        "sgst": {"match": [["state"]], "type": "num"},
+        "cess": {"match": [["cess"]], "type": "num"},
+        "supplier_filing_date": {"match": [["filing date"]], "type": "raw"},
+        "itc_available": {"match": [["itc availab"]], "type": "raw"},
+        "reason_not_available": {"match": [["reason"]], "type": "raw"}
+      }
+    },
+    "cdnr": {
+      "raw_names": ["CDNR", "B2B-CDNR"],
+      "canon_sheet": "T8A_CDNR",
+      "fields": {
+        "gstin": {"match": [["gstin of supplier"]], "type": "raw", "required": true},
+        "supplier": {"match": [["trade"], ["legal name"]], "type": "raw"},
+        "note_type": {"match": [["note type"]], "type": "raw"},
+        "supply_type": {"match": [["note supply type"], ["supply type"]], "type": "raw"},
+        "note_no": {"match": [["note number"]], "type": "raw"},
+        "note_date": {"match": [["note date"]], "type": "raw"},
+        "note_val": {"match": [["note value"]], "type": "num"},
+        "pos": {"match": [["place of supply"]], "type": "raw"},
+        "rate": {"match": [["rate"]], "type": "num"},
+        "taxable": {"match": [["taxable value"]], "type": "num"},
+        "igst": {"match": [["integrated tax"]], "type": "num"},
+        "cgst": {"match": [["central tax"]], "type": "num"},
+        "sgst": {"match": [["state"]], "type": "num"},
+        "cess": {"match": [["cess"]], "type": "num"},
+        "itc_available": {"match": [["itc availab"]], "type": "raw"}
+      }
+    }
+  }
+}

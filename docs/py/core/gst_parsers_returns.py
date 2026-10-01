@@ -152,6 +152,9 @@ def read_gstr1_hsn_all_months(path):
                                   source_tab), ...]}. A month genuinely absent from the returned
     dict means NEITHER format had a marker for it anywhere in the file -- callers must treat
     that as an explicit gap, never silently as a zero total."""
+    if mpu.use_canonical_1(path):
+        import gstr1_adapter
+        return gstr1_adapter.read_gstr1_hsn_all_months(path)
     if path in _HSN_ALL_MONTHS_CACHE:
         return _HSN_ALL_MONTHS_CACHE[path]
     wb = openpyxl.load_workbook(path, data_only=True)
@@ -223,6 +226,9 @@ def parse_gstr1(path, month):
     it raises if that month has no marker at all in a given sub-sheet (that
     sub-sheet is simply skipped for scoring only when the SHEET itself is
     entirely absent from the workbook, not when the month is missing from it)."""
+    if mpu.use_canonical_1(path):
+        import gstr1_adapter
+        return gstr1_adapter.parse_gstr1(path, month)
     wb = load_xlsx(path)
     out = {"taxable":0.0,"IGST":0.0,"CGST":0.0,"SGST":0.0,"CESS":0.0,
            "b2b_count":0,"b2b_no_irn":0,"lines":{},"blank_invno_lines":0,"blank_invno_taxable":0.0,"named_taxable":0.0,"named_IGST":0.0,"named_CGST":0.0,"named_SGST":0.0,
@@ -463,6 +469,9 @@ def parse_gstr3b(path, month):
     """Pull Table 3.1 and Table 4 values from GSTR-3B for ONE month, out of
     the merged workbook (one sheet per month). The sheet is located by its
     OWN in-sheet 'Year'/'Tax Period' content, not by its sheet name."""
+    if mpu.use_canonical_3b(path):
+        import gstr3b_adapter
+        return gstr3b_adapter.parse_gstr3b(path, month)
     wb=load_xlsx(path)
     ws = None
     months_found = []
@@ -572,6 +581,9 @@ def parse_einv(path, month):
     (available=False) -- callers already branch on this explicitly, so it is
     not hidden, just not a hard stop for what is a documented PARTIAL source."""
     import os
+    if path and os.path.exists(path) and mpu.use_canonical_einv(path):
+        import einv_adapter
+        return einv_adapter.parse_einv(path, month)
     out={"taxable":0.0,"IGST":0.0,"CGST":0.0,"SGST":0.0,"CESS":0.0,"count":0,"errors":0,"available":True,"lines":{},
          "cancel_col_found":False,"cancel_date_col_found":False,"cancelled":[]}
     if not path or not os.path.exists(path):
@@ -1117,7 +1129,7 @@ def main():
 
     # ---- Sheet 1: EXCEPTIONS (mismatches only) ----
     ws=wb.active; ws.title="Exceptions"
-    ws.cell(row=1,column=1,value=f"GST SCRUTINY  -  MISMATCHES ONLY  -  Period: {PERIOD_LABEL}").font=Font(bold=True,size=13,color="C00000")
+    ws.cell(row=1,column=1,value=f"GST SCRUTINY  -  MISMATCHES ONLY  -  Period: {mpu.period_title(PERIOD_LABEL)}").font=Font(bold=True,size=13,color="C00000")
     ws.cell(row=2,column=1,value=f"GSTIN {SELF_GSTIN}  |  {COMPANY_NAME or '(company auto-detected)'}  |  Tolerance: Rs {TOLERANCE}").font=Font(size=9,italic=True)
     hdr=["Section","Check","Left source","Left value","Right source","Right value","Difference","Result","Note / Tag"]
     for i,h in enumerate(hdr,1): ws.cell(row=4,column=i,value=h)
@@ -1130,7 +1142,7 @@ def main():
 
     # ---- Sheet 2: FULL COMPARISON ----
     ws2=wb.create_sheet("Full Comparison")
-    ws2.cell(row=1,column=1,value=f"GST SCRUTINY  -  FULL COMPARISON  -  Period: {PERIOD_LABEL}").font=Font(bold=True,size=13,color="1F3864")
+    ws2.cell(row=1,column=1,value=f"GST SCRUTINY  -  FULL COMPARISON  -  Period: {mpu.period_title(PERIOD_LABEL)}").font=Font(bold=True,size=13,color="1F3864")
     for i,h in enumerate(hdr,1): ws2.cell(row=3,column=i,value=h)
     style_header(ws2,3,9)
     write_rows(ws2,4,comparisons,only_mismatch=False)
@@ -1752,8 +1764,27 @@ def _load_2b_file_data(path):
     itc_rows = list(wb["ITC Available"].iter_rows(values_only=True)) if "ITC Available" in wb.sheetnames else None
 
     # ---------- amendment indices (whole-file, not month-scoped -- bug report §7) ----------
-    superseded_inv, b2ba_by_month = _read_b2ba_amendments(wb)
-    superseded_note, cdnra_by_month = _read_cdnra_amendments(wb)
+    # DEGRADE, don't discard: the amendment sheets (B2BA / B2B-CDNRA) only ADJUST the base
+    # B2B / B2B-CDNR rows. If their header text can't be located (confirmed real: a merged
+    # 2B whose B2BA sheet had lost its whole header block because the first period's B2BA was
+    # empty, and whose column layout also differs from other portal exports, so guessing
+    # columns by position would silently read the wrong ones), raising here used to throw
+    # away the ENTIRE 2B -- every month then reported 'GSTR-2B not supplied'. Instead: skip
+    # only the amendment overlay, say so loudly (log line + `amendment_warnings` on every
+    # parse_2b_excel() result), and keep using B2B / B2B-CDNR.
+    amendment_warnings = []
+    try:
+        superseded_inv, b2ba_by_month = _read_b2ba_amendments(wb)
+    except mpu.PeriodParseError as e:
+        superseded_inv, b2ba_by_month = set(), {}
+        amendment_warnings.append(f"B2BA amendments NOT applied to GSTR-2B ({os.path.basename(path)}): {e}")
+    try:
+        superseded_note, cdnra_by_month = _read_cdnra_amendments(wb)
+    except mpu.PeriodParseError as e:
+        superseded_note, cdnra_by_month = set(), {}
+        amendment_warnings.append(f"B2B-CDNRA amendments NOT applied to GSTR-2B ({os.path.basename(path)}): {e}")
+    for w in amendment_warnings:
+        print(f"[warn] {w} Amended invoices/notes in this file are therefore taken as-is from B2B / B2B-CDNR.")
 
     b2b_all_rows, b2b_cols = None, None
     if "B2B" in wb.sheetnames:
@@ -1773,9 +1804,54 @@ def _load_2b_file_data(path):
         superseded_note=superseded_note, cdnra_by_month=cdnra_by_month,
         b2b_all_rows=b2b_all_rows, b2b_cols=b2b_cols,
         cdnr_all_rows=cdnr_all_rows, cdnr_cols=cdnr_cols,
+        amendment_warnings=amendment_warnings,
     )
     _2B_FILE_CACHE[path] = data
     return data
+
+
+def _use_canonical_2b(path):
+    """True when GSTR-2B should go through the canonical layer: the switch in gst_config (or the
+    GST_2B_CANONICAL env var) is on, or `path` already IS a canonical 2B workbook."""
+    env = os.environ.get("GST_2B_CANONICAL")
+    if env is not None:
+        on = env.strip() == "1"
+    else:
+        try:
+            import gst_config
+            on = bool(getattr(gst_config, "GSTR2B_USE_CANONICAL", False))
+        except ImportError:
+            on = False
+    if on:
+        return True
+    try:
+        import gstr2b_adapter
+        return gstr2b_adapter.is_canonical_file(path)
+    except ImportError:
+        return False
+
+
+def _2b_rows_for_month(all_rows, month):
+    """Every row physically sitting under a marker block for `month`. Normally that is one
+    block; when the same period was downloaded in parts (portal 1,000-row cap) there are
+    several, and all are used. A row that is byte-identical to a row in an EARLIER block of
+    the same month is skipped -- that is the same download merged twice, not a new invoice --
+    while identical rows inside ONE block are kept (they are the file's own content)."""
+    blocks = mpu.find_blocks_for_month(all_rows, month)
+    if len(blocks) == 1:
+        s, e = blocks[0]
+        return all_rows[s:e]
+    out, seen = [], set()
+    for s, e in blocks:
+        keys = []
+        for r in all_rows[s:e]:
+            k = tuple(r)
+            if k in seen:
+                continue
+            out.append(r)
+            keys.append(k)
+        seen.update(keys)
+    return out
 
 
 def parse_2b_excel(path, month):
@@ -1792,6 +1868,9 @@ def parse_2b_excel(path, month):
     The expensive, month-independent parsing (one load_workbook(), one scan
     each of every 2B sheet) happens once per file in _load_2b_file_data();
     this function just does the cheap per-month lookup against that cache."""
+    if _use_canonical_2b(path):
+        import gstr2b_adapter
+        return gstr2b_adapter.parse_month(path, month)
     d = _load_2b_file_data(path)
 
     # ---------- Summary (Table 3), quarter-block-scoped ----------
@@ -1842,8 +1921,7 @@ def parse_2b_excel(path, month):
     b2b = []
     if d["b2b_cols"] is not None:
         c = d["b2b_cols"]
-        blk_start, blk_end = mpu.find_block_for_month(d["b2b_all_rows"], month)
-        for r in d["b2b_all_rows"][blk_start:blk_end]:
+        for r in _2b_rows_for_month(d["b2b_all_rows"], month):
             if not any(r) or not r[0] or mpu.is_marker_row(r):
                 continue
             shift = _2b_row_rate_shift(r, c["period"], c["rate"])
@@ -1895,8 +1973,7 @@ def parse_2b_excel(path, month):
     cdnr_skipped = 0
     if d["cdnr_cols"] is not None:
         c = d["cdnr_cols"]
-        blk_start, blk_end = mpu.find_block_for_month(d["cdnr_all_rows"], month)
-        for r in d["cdnr_all_rows"][blk_start:blk_end]:
+        for r in _2b_rows_for_month(d["cdnr_all_rows"], month):
             if not any(r) or not r[0] or mpu.is_marker_row(r):
                 continue
             shift = _2b_row_rate_shift(r, c["period"], c["rate"])
@@ -1945,7 +2022,8 @@ def parse_2b_excel(path, month):
     # branch above sets it to False and must not be clobbered back to True here).
     summary.setdefault("available", True)
     summary["cdnr_skipped_unparseable_this_month"] = cdnr_skipped
-    return dict(summary=summary, b2b=b2b, cdnr=cdnr, available=True)
+    return dict(summary=summary, b2b=b2b, cdnr=cdnr, available=True,
+                amendment_warnings=d.get("amendment_warnings", []))
 
 
 _ZERO_SUMMARY_KEYS = (
@@ -2210,6 +2288,9 @@ def parse_annual_ewb(path):
     Fixed the same way 'EWB No. & Dt.' already was: looked up BY NAME ('Doc No. & Dt.'), split
     with the same _split_ewb_no_dt() helper -- never a positional offset from a DIFFERENT
     column."""
+    if mpu.use_canonical_ewb(path):
+        import ewb_adapter
+        return ewb_adapter.parse_annual_ewb(path)
     wb = openpyxl.load_workbook(path, data_only=True)
     ws, hdr, _ = _find_data_sheet(wb)
     if ws is None:
@@ -2252,7 +2333,8 @@ def parse_annual_ewb(path):
 
 def filter_by_month(ewb_rows, month_key):
     """month_key e.g. 'Jan-23' -- matches on EWB date's month (not doc date)."""
-    return [r for r in ewb_rows if r["month"] == month_key]
+    unit = mpu.unit_months(month_key)      # a quarter's anchor label -> all of the quarter's months
+    return [r for r in ewb_rows if r["month"] in unit]
 
 
 
@@ -2303,6 +2385,9 @@ def parse_b2ba(path, month):
     first of which used to carry the invoice identity). This feeds both the B2 comparison's
     amendment-aware splicing AND the Rectification Pairs sheet, so an unfixed continuation row
     here would understate a revised invoice's value in both places. Forward-filled the same way."""
+    if mpu.use_canonical_1(path):
+        import gstr1_adapter
+        return gstr1_adapter.parse_b2ba(path, month)
     wb = openpyxl.load_workbook(path, data_only=True)
     if "b2ba" not in wb.sheetnames:
         return []
@@ -2348,6 +2433,9 @@ def parse_cdnra(path, month):
     scoped to ONE month's block out of the merged workbook.
     BUG FIX -- same root cause as parse_b2ba() above; confirmed on real data (e.g. note
     VOU24A000545 amended with both an 18% and a 28% line). Forward-filled the same way."""
+    if mpu.use_canonical_1(path):
+        import gstr1_adapter
+        return gstr1_adapter.parse_cdnra(path, month)
     wb = openpyxl.load_workbook(path, data_only=True)
     if "cdnra" not in wb.sheetnames:
         return []
@@ -2388,6 +2476,9 @@ def parse_cdnra(path, month):
 def parse_docs(path, month):
     """Table 13: Summary of Documents Issued, scoped to ONE month's block out
     of the merged workbook. Returns list of dicts for gap analysis against B2B."""
+    if mpu.use_canonical_1(path):
+        import gstr1_adapter
+        return gstr1_adapter.parse_docs(path, month)
     wb = openpyxl.load_workbook(path, data_only=True)
     if "docs" not in wb.sheetnames:
         return []

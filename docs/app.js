@@ -17,42 +17,42 @@ const ICONS = {
 
 // ---- section config -----------------------------------------------------
 const UPLOAD_SECTIONS = [
-  { id: "ewb_inward", step: 1, title: "Inward E-Way Bill", required: false, py: { kind: "ewb", direction: "inward" },
+  { id: "ewb_inward", step: 1, title: "Inward E-Way Bill", required: false, py: { kind: "ewb", direction: "inward" }, canonicalSource: "ewb",
     desc: "EWB MIS Report exports from the inward E-Way Bill portal folder.",
     accept: "EWB_MIS_Report_Excel (N).xls" },
-  { id: "ewb_outward", step: 2, title: "Outward E-Way Bill", required: false, py: { kind: "ewb", direction: "outward" },
+  { id: "ewb_outward", step: 2, title: "Outward E-Way Bill", required: false, py: { kind: "ewb", direction: "outward" }, canonicalSource: "ewb",
     desc: "EWB MIS Report exports from the outward E-Way Bill portal folder.",
     accept: "EWB_MIS_Report_Excel (N).xls" },
-  { id: "einv", step: 3, title: "E-Invoice", required: false, py: { kind: "merge", mergeKind: "einv" },
+  { id: "einv", step: 3, title: "E-Invoice", required: false, py: { kind: "merge", mergeKind: "einv" }, canonicalSource: "einv",
     desc: "Monthly E-Invoice exports, any number of periods.",
     accept: "per-period E-Invoice .xlsx" },
-  { id: "gstr1", step: 4, title: "GSTR-1", required: true, py: { kind: "merge", mergeKind: "gstr1" },
+  { id: "gstr1", step: 4, title: "GSTR-1", required: true, py: { kind: "merge", mergeKind: "gstr1" }, canonicalSource: "gstr1",
     desc: "Monthly or quarterly GSTR-1 exports for the financial year.",
     accept: "per-period GSTR-1 .xlsx" },
-  { id: "gstr2a", step: 5, title: "GSTR-2A", required: false, py: { kind: "merge", mergeKind: "gstr2a" },
+  { id: "gstr2a", step: 5, title: "GSTR-2A", required: false, py: { kind: "merge", mergeKind: "gstr2a" }, canonicalSource: "gstr2a",
     desc: "Monthly GSTR-2A exports for the financial year.",
     accept: "per-period GSTR-2A .xlsx",
     note: "Not yet exercised against real GSTR-2A data in this build — the code path is identical to the other return types, just unverified. Report an issue if it misbehaves." },
-  { id: "gstr2b", step: 6, title: "GSTR-2B", required: false, py: { kind: "gstr2b" },
+  { id: "gstr2b", step: 6, title: "GSTR-2B", required: false, py: { kind: "gstr2b" }, canonicalSource: "gstr2b",
     desc: "Monthly GSTR-2B exports — every workbook is aligned to the same set of worksheets before merging.",
     accept: "per-period GSTR-2B .xlsx" },
-  { id: "gstr3b", step: 7, title: "GSTR-3B", required: true, py: { kind: "gstr3b" },
+  { id: "gstr3b", step: 7, title: "GSTR-3B", required: true, py: { kind: "gstr3b" }, canonicalSource: "gstr3b",
     desc: "GSTR3B_&lt;GSTIN&gt;_&lt;MMYYYY&gt;.zip bundles straight from the portal (or already-extracted .xlsx files).",
     accept: ".zip bundles or .xlsx" },
 ];
 
 const LEDGER_SLOTS = [
-  { id: "cash", name: "Cash Ledger", ext: "CSV" },
-  { id: "credit", name: "Credit Ledger", ext: "CSV" },
-  { id: "liab1", name: "Liability Register — Part I", ext: "CSV" },
-  { id: "liab2", name: "Liability Ledger — Part II (DRC)", ext: "CSV" },
-  { id: "comparison", name: "Tax Liability & ITC Comparison", ext: "XLSX" },
-  { id: "table8a", name: "Table 8A", ext: "XLSX" },
+  { id: "cash", name: "Cash Ledger", ext: "CSV", canonicalSource: "ledger_cash" },
+  { id: "credit", name: "Credit Ledger", ext: "CSV", canonicalSource: "ledger_credit" },
+  { id: "liab1", name: "Liability Register — Part I", ext: "CSV", canonicalSource: "ledger_liability" },
+  { id: "liab2", name: "Liability Ledger — Part II (DRC)", ext: "CSV", canonicalSource: "ledger_liability_demand" },
+  { id: "comparison", name: "Tax Liability & ITC Comparison", ext: "XLSX", canonicalSource: "portal" },
+  { id: "table8a", name: "Table 8A", ext: "XLSX", canonicalSource: "table8a" },
 ];
 const ANNUAL_DOC_SLOTS = [
-  { id: "bo_profile", name: "BO / 360° Profile", ext: "XLSX" },
-  { id: "gstr9", name: "GSTR-9 Annual Return", ext: "XLSX" },
-  { id: "gstr9c", name: "GSTR-9C Reconciliation", ext: "XLSX" },
+  { id: "bo_profile", name: "BO / 360° Profile", ext: "XLSX", canonicalSource: "bo" },
+  { id: "gstr9", name: "GSTR-9 Annual Return", ext: "XLSX", canonicalSource: "gstr9" },
+  { id: "gstr9c", name: "GSTR-9C Reconciliation", ext: "XLSX", canonicalSource: "gstr9c" },
 ];
 const MASTER_SLOTS = [
   { id: "hsn_master", name: "HSN / SAC Code Master", ext: "XLSX" },
@@ -265,6 +265,9 @@ async function callGstr3b(filePairs, onStarted) {
 async function callGstr2b(filePairs, onStarted) {
   return await callWorker("gstr2b", { filePairs }, { onStarted });
 }
+async function callCanonicalPreview(source, name, data, onStarted) {
+  return await callWorker("canonical_preview", { source, name, data }, { onStarted });
+}
 async function callFullScrutiny(filePairs, bsPlData, onStarted) {
   return await callWorker("full_scrutiny", { filePairs, bsPlData }, { onStarted, timeoutMs: FULL_SCRUTINY_TIMEOUT_MS });
 }
@@ -344,7 +347,8 @@ function slotSectionHtml(id, title, desc, slots, opts) {
             </span>
             <span class="slot-status">${opts.disabled ? "—" : "Empty"}</span>
             ${opts.disabled ? "" : `<button class="slot-clear" type="button" data-slotclear="${id}:${sl.id}">Clear</button><input type="file" data-slotinput="${id}:${sl.id}">`}
-          </div>`).join("")}
+          </div>
+          ${sl.canonicalSource ? `<div class="slot-result" data-slotresult="${id}:${sl.id}"></div>` : ""}`).join("")}
       </div>
       ${opts.persist ? `<p class="persist-note">${ICONS.lock} Saved in this browser — you won't need to re-upload these next time.</p>` : ""}
       ${opts.footnote ? `<p class="card-desc" style="margin-top:12px;">${opts.footnote}</p>` : ""}
@@ -476,6 +480,44 @@ function showError(cfg, message, detail) {
   markUndone(cfg.id);
 }
 
+// The per-step "converted to canonical format" block shown right under a merge result — the
+// same idea as the final results screen's canonical-file cards (see renderScrutinyResult),
+// just one step earlier and for one source instead of all of them.
+function renderCanonicalBlock(canon) {
+  if (!canon) return "";
+  if (!canon.ok) {
+    return `
+    <div class="result-line warn">
+      ${ICONS.warn}
+      <p>Could not convert to the canonical format: ${escapeHtml(canon.error)}<br>
+         <span class="fmeta">The merged file above is unaffected and will still be used; this only means the extra check could not run right now.</span></p>
+    </div>`;
+  }
+  const kb = (canon.canonical_bytes.length / 1024).toFixed(0);
+  const issues = canon.issues || [];
+  const hasIssues = canon.status !== "OK";
+  const okLine = hasIssues
+    ? `${ICONS.warn} <p>Converted to the canonical format &mdash; ${issues.length} issue${issues.length === 1 ? "" : "s"} found (see below).</p>`
+    : `${ICONS.check} <p>Converted to the canonical format &mdash; no issues found.</p>`;
+  return `
+    <div class="result-line${hasIssues ? " warn" : ""}">${okLine}</div>
+    ${(canon.notes || []).map(n => `<div class="result-line">${ICONS.check} <p>${escapeHtml(n)}</p></div>`).join("")}
+    <div class="download-row">
+      <div>
+        <div class="fname">${escapeHtml(canon.canonical_name)}</div>
+        <div class="fmeta">${kb} KB &middot; every value traceable to its source row; mapping report and issues inside</div>
+      </div>
+      <div class="download-btns">
+        <button class="btn small ghost" type="button" data-action="download-canon">Download canonical file</button>
+      </div>
+    </div>
+    ${issues.length ? `
+    <details class="run-log">
+      <summary>Conversion notes (${issues.length})</summary>
+      <pre>${escapeHtml(issues.map(i => `[${i.severity}] ${i.id}: ${i.message}`).join("\n\n"))}</pre>
+    </details>` : ""}`;
+}
+
 function showResult(cfg, r, extraLine) {
   if (!r) {
     showError(cfg, `No ${cfg.title}-shaped files were detected among what you uploaded. Double-check these are the right export type.`);
@@ -492,13 +534,16 @@ function showResult(cfg, r, extraLine) {
     <div class="result-actions">
       <button class="btn small ghost" type="button" data-action="download">Download merged file</button>
       <button class="btn small danger" type="button" data-action="clear">Clear</button>
-    </div>`;
+    </div>
+    ${renderCanonicalBlock(r.canonical)}`;
   workbench[cfg.id] = r;
   // r.output_bytes/r.output_name are closed over here rather than re-read
   // from workbench[cfg.id] on click, so a later Clear (which deletes that
   // key) can never turn this button into a dead click.
   resultBox.querySelector('[data-action="download"]').addEventListener("click", () => downloadBytes(r.output_bytes, r.output_name));
   resultBox.querySelector('[data-action="clear"]').addEventListener("click", () => clearUploadSection(cfg));
+  const canonBtn = resultBox.querySelector('[data-action="download-canon"]');
+  if (canonBtn) canonBtn.addEventListener("click", () => downloadBytes(r.canonical.canonical_bytes, r.canonical.canonical_name));
   markDone(cfg.id);
 }
 
@@ -551,6 +596,19 @@ async function processSection(cfg, filePairs) {
     } else if (cfg.py.kind === "gstr3b") {
       result = await callGstr3b(filePairs, onStarted);
     }
+    // Convert right away, so a mapping problem in THIS file shows up now, not only at the end
+    // of a full run — a separate, additive call: it never changes the merged file itself, and a
+    // failure here is shown alongside the merge result rather than failing the upload step.
+    if (result && cfg.canonicalSource) {
+      progWrap.innerHTML = `<div class="progress-wrap"><div class="progress-track"><div class="progress-fill" data-fill></div></div><div class="progress-label">Converting to the fixed canonical format…</div></div>`;
+      requestAnimationFrame(() => { const f = progWrap.querySelector("[data-fill]"); if (f) f.style.width = "100%"; });
+      try {
+        result.canonical = await callCanonicalPreview(cfg.canonicalSource, result.output_name, result.output_bytes, () => {});
+      } catch (err) {
+        console.error(err);
+        result.canonical = { ok: false, error: String((err && err.message) || err) };
+      }
+    }
     progWrap.innerHTML = "";
     showResult(cfg, result, extraLine);
   } catch (err) {
@@ -591,6 +649,33 @@ UPLOAD_SECTIONS.forEach(cfg => {
 // ---------------------------------------------------------------------
 // Ledgers / masters — real byte capture, no processing needed
 // ---------------------------------------------------------------------
+// "Converted OK / here are the issues" for a file dropped in as it is (ledgers, portal comparison, Table 8A,
+// BO Profile, GSTR-9 / 9C): the same extra check the merge steps show, run right after the file is captured. Purely
+// additive - the file itself is unchanged and is what the full scrutiny still receives.
+const slotPreviewToken = {};
+async function previewSlotConversion(key, sl, fileName, bytes) {
+  const box = document.querySelector(`[data-slotresult="${key}"]`);
+  if (!box) return;
+  const token = (slotPreviewToken[key] = (slotPreviewToken[key] || 0) + 1);
+  if (!workerReady) {
+    box.innerHTML = `<div class="result-line warn">${ICONS.warn}<p>The Python runtime is still loading, so the conversion check was skipped for this file. Re-add it once the runtime is ready to see it.</p></div>`;
+    return;
+  }
+  box.innerHTML = `<div class="progress-wrap"><div class="progress-track"><div class="progress-fill" data-fill></div></div><div class="progress-label">Converting to the fixed canonical format…</div></div>`;
+  requestAnimationFrame(() => { const f = box.querySelector("[data-fill]"); if (f) f.style.width = "100%"; });
+  let canon;
+  try {
+    canon = await callCanonicalPreview(sl.canonicalSource, fileName, bytes, () => {});
+  } catch (err) {
+    console.error(err);
+    canon = { ok: false, error: String((err && err.message) || err) };
+  }
+  if (slotPreviewToken[key] !== token || !workbench[key]) return;      // cleared or replaced meanwhile
+  box.innerHTML = renderCanonicalBlock(canon);
+  const btn = box.querySelector('[data-action="download-canon"]');
+  if (btn) btn.addEventListener("click", () => downloadBytes(canon.canonical_bytes, canon.canonical_name));
+}
+
 function wireSlotSection(sectionId, slots, opts) {
   opts = opts || {};
   const doneSlots = new Set();
@@ -610,6 +695,7 @@ function wireSlotSection(sectionId, slots, opts) {
       setStatus(sectionId, doneSlots.size === slots.length ? "ready" : "processing", `${doneSlots.size} of ${slots.length}`);
       if (doneSlots.size > 0) markDone(sectionId);
       if (opts.persist) persistMaster(sl.id, file.name, bytes);
+      if (sl.canonicalSource) previewSlotConversion(key, sl, file.name, bytes);
     }
 
     // Resets just this one slot (e.g. the wrong file was dropped in) —
@@ -625,6 +711,9 @@ function wireSlotSection(sectionId, slots, opts) {
       setStatus(sectionId, doneSlots.size === 0 ? "empty" : "processing", doneSlots.size === 0 ? "Not started" : `${doneSlots.size} of ${slots.length}`);
       if (doneSlots.size === 0) markUndone(sectionId);
       if (opts.persist) removePersistedMaster(sl.id);
+      const rbox = document.querySelector(`[data-slotresult="${key}"]`);
+      if (rbox) rbox.innerHTML = "";
+      slotPreviewToken[key] = (slotPreviewToken[key] || 0) + 1;
     }
 
     el.addEventListener("click", () => input.click());
@@ -792,6 +881,8 @@ function renderScrutinyResult(result) {
   const gstin = gstinField.value.trim();
   const fy = fyField.value.trim();
   const kb = (result.output_bytes.length / 1024).toFixed(0);
+  const canonFiles = result.canonical_files || (result.canonical_2b ? [result.canonical_2b] : []);
+  const canonIssues = result.canonical_issues || [];
 
   results.hidden = false;
   results.innerHTML = `
@@ -813,12 +904,31 @@ function renderScrutinyResult(result) {
           <button class="btn" id="download-pdf-btn" type="button">Download PDF</button>
         </div>
       </div>
+      ${canonFiles.map((c, i) => `
+      <div class="download-row">
+        <div>
+          <div class="fname">${escapeHtml(c.name)}</div>
+          <div class="fmeta">${(c.bytes.length / 1024).toFixed(0)} KB &middot; converted to the fixed canonical format &mdash; every value traceable to its source row; mapping report and issues inside</div>
+        </div>
+        <div class="download-btns">
+          <button class="btn" id="download-canon-${i}" type="button">Download canonical file</button>
+        </div>
+      </div>`).join("")}
+      ${canonIssues.length ? `
+      <details class="run-log" open>
+        <summary>Conversion notes (${canonIssues.length})</summary>
+        <pre>${escapeHtml(canonIssues.map(i => `[${i.severity}] ${i.source || "GSTR-2B"} ${i.id}: ${i.message}`).join("\n\n"))}</pre>
+      </details>` : ""}
       <details class="run-log">
         <summary>Full run log</summary>
         <pre>${log.replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]))}</pre>
       </details>
     </section>`;
   document.getElementById("download-btn").addEventListener("click", () => downloadBytes(result.output_bytes, result.output_name));
+  canonFiles.forEach((c, i) => {
+    const btn = document.getElementById(`download-canon-${i}`);
+    if (btn) btn.addEventListener("click", () => downloadBytes(c.bytes, c.name));
+  });
 
   const pdfBtn = document.getElementById("download-pdf-btn");
   const pdfName = result.output_name.replace(/\.xlsx$/i, ".pdf");

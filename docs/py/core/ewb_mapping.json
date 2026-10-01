@@ -1,0 +1,20 @@
+{
+  "_about": "E-Way Bill canonical layer - what each canonical field is called in the raw merged e-way bill workbook (one flat sheet, one header row, no period banners at all -- see docs/EWB_CANONICAL_SPEC.md). A file is recognised as an e-way bill export by this exact header signature (checked before anything else, same test gst_core.classify_folder already used): 'EWB No.', 'From GSTIN & Name' and 'To GSTIN & Name' all present on some sheet's first 3 rows. Headings are compared after lower-casing and stripping every non-alphanumeric character. 'exact' = accepted spellings (first is the canonical one, the rest are aliases); 'type': 'num' = converted to a number (blank/#N/A/NA = 0), 'raw' = kept exactly as in the source (the combined 'No. & Dt.' text columns are split into number/date/time by the reader, not here, so the canonical file always keeps the untouched source text). 'required': true = the file is rejected with a plain message naming the missing column if it cannot be found.",
+  "version": "1",
+  "signature_headers": ["EWB No.", "From GSTIN & Name", "To GSTIN & Name"],
+  "fields": {
+    "ewbno_raw":     {"label": "EWB No.",              "exact": ["EWB No."],              "type": "raw", "required": true},
+    "ewb_combined":  {"label": "EWB No. & Dt.",         "exact": ["EWB No. & Dt."],         "type": "raw", "required": true},
+    "doc_combined":  {"label": "Doc No. & Dt.",         "exact": ["Doc No. & Dt."],         "type": "raw", "required": true},
+    "from_combined": {"label": "From GSTIN & Name",     "exact": ["From GSTIN & Name"],     "type": "raw", "required": true},
+    "to_combined":   {"label": "To GSTIN & Name",       "exact": ["To GSTIN & Name"],       "type": "raw", "required": true},
+    "from_place":    {"label": "From Place & Pin",      "exact": ["From Place & Pin"],      "type": "raw"},
+    "to_place":      {"label": "To Place & Pin",        "exact": ["To Place & Pin"],        "type": "raw"},
+    "assess":        {"label": "Assess Val.",           "exact": ["Assess Val."],           "type": "num", "required": true},
+    "taxval":        {"label": "Tax Val.",              "exact": ["Tax Val."],              "type": "num", "required": true},
+    "hsn":           {"label": "HSN Code",              "exact": ["HSN Code"],              "type": "raw"},
+    "hsn_desc":      {"label": "HSN Desc.",             "exact": ["HSN Desc."],             "type": "raw"},
+    "vehicle":       {"label": "Latest Vehicle No.",    "exact": ["Latest Vehicle No."],    "type": "raw"},
+    "rate":          {"label": "TAX RATE",              "exact": ["TAX RATE", "Tax Rate"],  "type": "num", "absent_ok": true}
+  }
+}

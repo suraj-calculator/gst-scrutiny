@@ -65,6 +65,11 @@ def fy_start_year(fy_string):
 def month_key(month_name):
     # Quarterly tax periods look like "Apr-Jun" / "Jan-Mar" -> use the start month
     raw = str(month_name).strip()
+    # "Quarter 4" / "Qtr-4" / "Q4" -> the quarter's first month (Q1 = Apr-Jun ... Q4 = Jan-Mar)
+    import re as _re
+    q = _re.fullmatch(r"(?:quarter|qtr|q)\s*-?\s*([1-4])(?:\s*\(.*\))?", raw, flags=_re.IGNORECASE)
+    if q:
+        return (1, 4, 7, 10)[int(q.group(1)) - 1]
     first_token = raw.split("-")[0].strip().lower()[:9]
     for k, v in MONTH_ORDER_IN_FY.items():
         if first_token.startswith(k) or k.startswith(first_token):

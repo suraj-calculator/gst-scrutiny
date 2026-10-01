@@ -80,6 +80,7 @@ from openpyxl.utils import get_column_letter
 
 # ---- reuse the three existing engines (no logic change) -------------------
 import gst_parsers_returns as raw
+import gst_core as mpu
 import gst_checks_monthly as ana
 import gst_checks_monthly as eway
 try:
@@ -314,9 +315,9 @@ def _comp_rows_iter(comparisons):
 
 def write_comparison(ws, comparisons, only_mismatch):
     """Replicates the original Comparison/Exceptions sheets exactly."""
-    title = ("GST SCRUTINY  -  MISMATCHES ONLY  -  Period: " + raw.PERIOD_LABEL
+    title = ("GST SCRUTINY  -  MISMATCHES ONLY  -  Period: " + mpu.period_title(raw.PERIOD_LABEL)
              if only_mismatch else
-             "GST SCRUTINY  -  FULL COMPARISON  -  Period: " + raw.PERIOD_LABEL)
+             "GST SCRUTINY  -  FULL COMPARISON  -  Period: " + mpu.period_title(raw.PERIOD_LABEL))
     ws.cell(1, 1, title).font = Font(bold=True, size=13,
                                      color="C00000" if only_mismatch else "1F3864")
     if only_mismatch:
@@ -396,7 +397,7 @@ def _excel_safe(v):
 
 def write_analysis14(ws, findings):
     """Sooraj's 14 checks (#0-#14) — same content gst_analysis_checks writes."""
-    ws.cell(1, 1, f"GST SCRUTINY — ANALYSIS (Sooraj's 14 checks) — Period {raw.PERIOD_LABEL}").font = TITLEF
+    ws.cell(1, 1, f"GST SCRUTINY — ANALYSIS (Sooraj's 14 checks) — Period {mpu.period_title(raw.PERIOD_LABEL)}").font = TITLEF
     ws.cell(2, 1, f"GSTIN {raw.SELF_GSTIN}  |  {raw.COMPANY_NAME or '(company auto-detected)'}").font = Font(size=9, italic=True)
     counts = {s: sum(1 for f in findings if f.severity == s) for s in ("FLAG", "REVIEW", "INFO", "PASS")}
     ws.cell(3, 1, "   ".join(f"{k}: {v}" for k, v in counts.items())).font = Font(size=10, bold=True)
@@ -562,7 +563,7 @@ def write_eway(ws_find, ws_det, findings):
 def write_dashboard(ws, data):
     """Cross-file: every actionable item from BOTH pipelines, ranked together."""
     meta = data["meta"]
-    ws.cell(1, 1, f"UNIFIED GST SCRUTINY — CROSS-FILE DASHBOARD — Period {raw.PERIOD_LABEL}").font = TITLEF
+    ws.cell(1, 1, f"UNIFIED GST SCRUTINY — CROSS-FILE DASHBOARD — Period {mpu.period_title(raw.PERIOD_LABEL)}").font = TITLEF
     ws.cell(2, 1, f"GSTIN {raw.SELF_GSTIN}  |  {raw.COMPANY_NAME or '(company auto-detected)'}  |  "
                   "one ranked view of Comparison + Analysis + E-Way-Bill").font = Font(size=9, italic=True)
     stamp = (f"generated {_dt.datetime.now():%Y-%m-%d %H:%M:%S}  |  "

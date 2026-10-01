@@ -1,0 +1,136 @@
+{
+  "_about": "GSTR-3B canonical layer - how each line of the 3B form is recognised (spec: docs/GSTR3B_CANONICAL_SPEC.md). A line is found by its LABEL text, never by row or column position. Each rule is tested on the row's text ('text' = every non-empty cell of the row joined with a space). Rule keys (all that are present must hold): 'all' = every substring appears (case-sensitive); 'any' = at least one appears; 'none' = none appears; 'lower_all' = every substring appears ignoring case; 'startswith' = the stripped row text starts with it. A rule with 'section' only looks between the row whose text starts with section.start and the row whose text starts with section.end, and needs 'row_startswith' (tested in the order given by 'row_startswith', first hit wins per row) plus at least one number on the row. 'required': true means the month cannot be processed without the line (ERROR); otherwise a missing line is a WARNING and the engine treats it as absent. To support a reworded form line, add its wording to the right rule. 'absent_ok': true = the line legitimately does not exist in newer forms, so its absence is INFO, not a warning.",
+  "version": "1",
+  "meta_labels": {
+    "year": [
+      "year",
+      "financial year"
+    ],
+    "tax_period": [
+      "tax period"
+    ],
+    "gstin": [
+      "gstin"
+    ],
+    "arn": [
+      "arn"
+    ],
+    "arn_date": [
+      "date of arn",
+      "arn date"
+    ],
+    "legal_name": [
+      "legal name of the registered person"
+    ],
+    "trade_name": [
+      "trade name, if any"
+    ],
+    "generated_on": [
+      "date and time of generation"
+    ]
+  },
+  "header_cells": [
+    "totaltaxablevalue",
+    "integratedtax",
+    "centraltax",
+    "stateuttax",
+    "cess"
+  ],
+  "lines": {
+    "3.1a": {
+      "desc": "3.1(a) Outward taxable supplies (other than zero rated, nil rated and exempted)",
+      "all": [
+        "Outward Taxable",
+        "other than zero"
+      ],
+      "required": true
+    },
+    "3.1b": {
+      "desc": "3.1(b) Outward taxable supplies (zero rated)",
+      "any": [
+        "(b)",
+        "(zero rated )"
+      ],
+      "none": [
+        "other than zero"
+      ],
+      "lower_all": [
+        "zero rated"
+      ]
+    },
+    "3.1c": {
+      "desc": "3.1(c) Other outward supplies (nil rated, exempted)",
+      "all": [
+        "(c)",
+        "Nil rated",
+        "Other Outward"
+      ]
+    },
+    "3.1d": {
+      "desc": "3.1(d) Inward supplies (liable to reverse charge)",
+      "all": [
+        "Inward supplies (liable to reverse charge)"
+      ]
+    },
+    "3.1e": {
+      "desc": "3.1(e) Non-GST outward supplies",
+      "all": [
+        "(e)",
+        "Non-GST"
+      ]
+    },
+    "4A3": {
+      "desc": "4(A)(3) ITC on inward supplies liable to reverse charge",
+      "all": [
+        "(3) Inward supplies liable to reverse charge"
+      ]
+    },
+    "4A4": {
+      "desc": "4(A)(4) ITC on inward supplies from ISD",
+      "all": [
+        "(4) Inward supplies from ISD"
+      ]
+    },
+    "4A5": {
+      "desc": "4(A)(5) All other ITC",
+      "all": [
+        "(5) All other ITC"
+      ],
+      "required": true
+    },
+    "4B1": {
+      "desc": "4(B)(1) ITC reversed - as per rules 38, 42, 43 and section 17(5)",
+      "section": {
+        "start": "B. ITC Reversed",
+        "end": "C. Net ITC available"
+      },
+      "row_startswith": [
+        "(1)"
+      ],
+      "zero_default": true
+    },
+    "4B2": {
+      "desc": "4(B)(2) ITC reversed - others",
+      "section": {
+        "start": "B. ITC Reversed",
+        "end": "C. Net ITC available"
+      },
+      "row_startswith": [
+        "(2) Others"
+      ],
+      "zero_default": true
+    },
+    "4C": {
+      "desc": "4(C) Net ITC available (A - B)",
+      "all": [
+        "Net ITC available"
+      ],
+      "required": true
+    },
+    "4D175": {
+      "desc": "4(D)(1) Ineligible ITC as per section 17(5) (forms before Aug-2022 only)",
+      "startswith": "(1) As per section 17(5)",
+      "absent_ok": true
+    }
+  }
+}

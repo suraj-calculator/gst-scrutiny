@@ -1,0 +1,220 @@
+{
+  "_about": "BO Profile (360-degree taxpayer profile) canonical layer - which raw sheet feeds which canonical table and how each field's column is found (spec: docs/BOPROFILE_CANONICAL_SPEC.md). 'kind': 'kv' = label/value rows (Demographic Details); 'fy' = a table keyed by Financial Year; 'bifa' = the same with a two-row heading; 'itc' = ITC Passed On / Received (three merged groups INTRA / INTER / TOTAL, the engine reads the TOTAL pair); 'list' = a flat list of rows. Exactly as the original reader did, every column is located by heading: a field's column is the FIRST column whose heading contains ALL fragments of its 'match' (case-insensitive substrings). 'itc' fields also carry the original 'pos' (column index) and are found by position if the heading of the TOTAL group confirms it, else by heading (warning), else by position (warning). 'plain_supply' = the n-th column whose heading contains 'supply' but not 'tax' (EWB table). 'type': 'num' = number (BO amounts are in lakhs, '%' ignored; a column that cannot be found gives blank, not 0), 'raw' = kept as in the source. 'sheet' = the exact sheet name; 'prefix' = the sheet is also accepted by its leading words (the portal truncates long sheet names to 31 characters, so the truncation point can differ).",
+  "version": "1",
+  "tables": {
+    "demographic": {
+      "kind": "kv",
+      "sheet": "Demographic Details",
+      "canon_sheet": "BO_DEMOGRAPHIC"
+    },
+    "financial": {
+      "kind": "fy",
+      "sheet": "Financial Information",
+      "canon_sheet": "BO_FINANCIAL",
+      "fields": {
+        "turnover": {"match": [["turnover"]], "type": "num"},
+        "taxable_turnover": {"match": [["taxable turnover"]], "type": "num"},
+        "export_turnover": {"match": [["export turnover"]], "type": "num"},
+        "total_tax_liability": {"match": [["total tax liability"]], "type": "num"},
+        "tax_paid_by_itc": {"match": [["tax paid by itc"]], "type": "num"},
+        "tax_paid_in_cash": {"match": [["tax paid in cash"]], "type": "num"},
+        "itc_availed": {"match": [["itc availed"]], "type": "num"},
+        "itc_utilization_pct": {"match": [["itc utilization"]], "type": "num"},
+        "effective_tax_rate_pct": {"match": [["effective tax rate"]], "type": "num"},
+        "itc_reversal": {"match": [["itc reversal"]], "type": "num"}
+      }
+    },
+    "bifa": {
+      "kind": "bifa",
+      "sheet": "BIFA Specific Information",
+      "canon_sheet": "BO_BIFA",
+      "fields": {
+        "liability_gstr1": {"match": [["liability as per gstr1"]], "type": "num"},
+        "liability_gstr3b": {"match": [["liability as per gstr3b"]], "type": "num"},
+        "diff_liability": {"match": [["difference liability"]], "type": "num"},
+        "itc_r3b": {"match": [["itc availed in r3b"]], "type": "num"},
+        "itc_r2b_r2a": {"match": [["itc accrued in r2b"]], "type": "num"},
+        "diff_itc": {"match": [["difference itc"]], "type": "num"},
+        "supply_as_per_gstr3b": {"match": [["supply value as per gstr3b"]], "type": "num"},
+        "liability_ewb": {"match": [["liability as per ewb"]], "type": "num"}
+      }
+    },
+    "itc_passed": {
+      "kind": "itc",
+      "sheet": "ITC Passed On",
+      "canon_sheet": "BO_ITC_PASSED",
+      "fields": {
+        "total_beneficiaries": {"pos": 5, "match": [["total", "beneficiar"]], "type": "num"},
+        "total_itc": {"pos": 6, "match": [["total", "itc"]], "type": "num"}
+      }
+    },
+    "itc_received": {
+      "kind": "itc",
+      "sheet": "ITC Received",
+      "canon_sheet": "BO_ITC_RECEIVED",
+      "fields": {
+        "total_suppliers": {"pos": 5, "match": [["total", "supplier"]], "type": "num"},
+        "total_itc": {"pos": 6, "match": [["total", "itc"]], "type": "num"}
+      }
+    },
+    "ewb": {
+      "kind": "fy",
+      "sheet": "EWB Related Information",
+      "canon_sheet": "BO_EWB",
+      "fields": {
+        "inward_tax": {"match": [["inward supply tax"]], "type": "num"},
+        "inward_ewb_count": {"match": [["number of inward"]], "type": "num"},
+        "outward_tax": {"match": [["outward supply tax"]], "type": "num"},
+        "outward_ewb_count": {"match": [["number of outward"]], "type": "num"},
+        "ratio_in_out": {"match": [["ratio"]], "type": "num"},
+        "inward_supply": {"plain_supply": 0, "type": "num"},
+        "outward_supply": {"plain_supply": 1, "type": "num"}
+      }
+    },
+    "einv": {
+      "kind": "fy",
+      "sheet": "E-Invoice Related Information",
+      "canon_sheet": "BO_EINV",
+      "fields": {
+        "active_count": {"match": [["count of active"]], "type": "num"},
+        "cancelled_count": {"match": [["count of cancelled"]], "type": "num"},
+        "active_assessable_value": {"match": [["active assessable value"]], "type": "num"},
+        "active_taxes": {"match": [["active taxes"]], "type": "num"},
+        "cancelled_assessable_value": {"match": [["cancelled assessable value"]], "type": "num"},
+        "cancelled_taxes": {"match": [["cancelled taxes"]], "type": "num"}
+      }
+    },
+    "refund": {
+      "kind": "fy",
+      "sheet": "Refund Details",
+      "canon_sheet": "BO_REFUND",
+      "fields": {
+        "claimed": {"match": [["total claimed amount"]], "type": "num"},
+        "rejected": {"match": [["total rejected amount"]], "type": "num"},
+        "sanctioned": {"match": [["total sanctioned amount"]], "type": "num"}
+      }
+    },
+    "top_beneficiaries": {
+      "kind": "list",
+      "sheet": "Top 10 Beneficiaries based on I",
+      "canon_sheet": "BO_TOP_BENEFICIARIES",
+      "prefix": "Top 10 Beneficiaries",
+      "fields": {
+        "gstin": {"match": [["receiver gstin"]], "type": "raw"},
+        "name": {"match": [["trade name"]], "type": "raw"},
+        "reg_start": {"match": [["registration start date"]], "type": "raw"},
+        "status": {"match": [["status"]], "type": "raw"},
+        "risk": {"match": [["overall risk score"]], "type": "raw"},
+        "amount": {"match": [["itc passed on"]], "type": "raw"}
+      }
+    },
+    "top_suppliers": {
+      "kind": "list",
+      "sheet": "Top 10 Suppliers based on ITC R",
+      "canon_sheet": "BO_TOP_SUPPLIERS",
+      "prefix": "Top 10 Suppliers",
+      "fields": {
+        "gstin": {"match": [["supplier gstin"]], "type": "raw"},
+        "name": {"match": [["trade name"]], "type": "raw"},
+        "reg_start": {"match": [["registration start date"]], "type": "raw"},
+        "status": {"match": [["status"]], "type": "raw"},
+        "risk": {"match": [["overall risk score"]], "type": "raw"},
+        "amount": {"match": [["itc received"]], "type": "raw"}
+      }
+    },
+    "related_itc_received": {
+      "kind": "list",
+      "sheet": "ITC Received from Related - Can",
+      "canon_sheet": "BO_RELATED_RECEIVED",
+      "prefix": "ITC Received from Related",
+      "fields": {
+        "fy": {"match": [["financial year"]], "type": "raw"},
+        "gstin": {"match": [["supplier gstin"]], "type": "raw"},
+        "name": {"match": [["trade name"]], "type": "raw"},
+        "related_parameter": {"match": [["related parameter"]], "type": "raw"},
+        "status": {"match": [["status"]], "type": "raw"},
+        "cancellation_date": {"match": [["cancellation date"]], "type": "raw"},
+        "reason": {"match": [["cancellation reason"]], "type": "raw"},
+        "total_itc": {"match": [["total itc received"]], "type": "raw"}
+      }
+    },
+    "related_itc_passed": {
+      "kind": "list",
+      "sheet": "ITC Passed On to Related - Canc",
+      "canon_sheet": "BO_RELATED_PASSED",
+      "prefix": "ITC Passed On to Related",
+      "fields": {
+        "fy": {"match": [["financial year"]], "type": "raw"},
+        "gstin": {"match": [["receiver gstin"]], "type": "raw"},
+        "name": {"match": [["trade name"]], "type": "raw"},
+        "related_parameter": {"match": [["related parameter"]], "type": "raw"},
+        "status": {"match": [["status"]], "type": "raw"},
+        "cancellation_date": {"match": [["cancellation date"]], "type": "raw"},
+        "reason": {"match": [["cancellation reason"]], "type": "raw"},
+        "total_itc": {"match": [["total itc passed"]], "type": "raw"}
+      }
+    },
+    "drc_payments": {
+      "kind": "list",
+      "sheet": "DRC Payment Information",
+      "canon_sheet": "BO_DRC",
+      "fields": {
+        "source_id": {"match": [["source id"]], "type": "raw"},
+        "description": {"match": [["transaction type description"]], "type": "raw"},
+        "date": {"match": [["transaction date"]], "type": "raw"},
+        "method": {"match": [["payment method"]], "type": "raw"},
+        "cgst": {"match": [["cgst tax"]], "type": "raw"},
+        "sgst": {"match": [["sgst tax"]], "type": "raw"},
+        "igst": {"match": [["igst tax"]], "type": "raw"},
+        "cess": {"match": [["cess"]], "type": "raw"},
+        "other": {"match": [["other than tax"]], "type": "raw"}
+      }
+    },
+    "appeals": {
+      "kind": "list",
+      "sheet": "Appeal Information",
+      "canon_sheet": "BO_APPEALS",
+      "fields": {
+        "fy": {"match": [["financial year"]], "type": "raw"},
+        "arn": {"match": [["arn"]], "type": "raw"},
+        "filing_date": {"match": [["case filing date"]], "type": "raw"},
+        "status": {"match": [["case status"]], "type": "raw"},
+        "case_type": {"match": [["case type"]], "type": "raw"},
+        "officer": {"match": [["tax officer name"]], "type": "raw"},
+        "order_number": {"match": [["order number"]], "type": "raw"}
+      }
+    },
+    "cases": {
+      "kind": "list",
+      "sheet": "Case Information",
+      "canon_sheet": "BO_CASES",
+      "fields": {
+        "case_id": {"match": [["arn", "case id"]], "type": "raw"},
+        "reference_id": {"match": [["reference id"]], "type": "raw"},
+        "action_date": {"match": [["action date"]], "type": "raw"},
+        "tax_period": {"match": [["tax period"]], "type": "raw"},
+        "case_type": {"match": [["case type"]], "type": "raw"},
+        "status": {"match": [["case status"]], "type": "raw"},
+        "scn_date": {"match": [["scn date"]], "type": "raw"},
+        "scn_number": {"match": [["scn number"]], "type": "raw"},
+        "cgst": {"match": [["cgst tax"]], "type": "raw"},
+        "sgst": {"match": [["sgst tax"]], "type": "raw"},
+        "igst": {"match": [["igst tax"]], "type": "raw"},
+        "cess": {"match": [["cess"]], "type": "raw"}
+      }
+    },
+    "transfers": {
+      "kind": "list",
+      "sheet": "Transfer Information",
+      "canon_sheet": "BO_TRANSFERS",
+      "fields": {
+        "date": {"match": [["recommend date"]], "type": "raw"},
+        "source_case_id": {"match": [["source case id"]], "type": "raw"},
+        "target_case_id": {"match": [["target case id"]], "type": "raw"},
+        "source_module": {"match": [["source module name"]], "type": "raw"},
+        "target_module": {"match": [["target module name"]], "type": "raw"},
+        "status": {"match": [["status"]], "type": "raw"}
+      }
+    }
+  }
+}

@@ -235,6 +235,89 @@ def process_gstr2b(files, work_dir):
     return process_merge("gstr2b", aligned, os.path.join(work_dir, "merge"))
 
 
+# source key -> (canonical-layer module, plain-language label, extra build argument or None).
+# Every source that has a canonical converter: the merge steps (einv, gstr1, gstr2a, gstr2b, gstr3b), the e-way bill
+# merge (ewb), and the files dropped in as they are (the four ledger CSVs, the portal comparison, Table 8A, BO Profile,
+# GSTR-9 and GSTR-9C). See the docs/*_CANONICAL_SPEC.md files.
+CANONICAL_ADAPTERS = {
+    "gstr1": ("gstr1_adapter", "GSTR-1", None),
+    "gstr2a": ("gstr2a_adapter", "GSTR-2A", None),
+    "gstr2b": ("gstr2b_adapter", "GSTR-2B", None),
+    "gstr3b": ("gstr3b_adapter", "GSTR-3B", None),
+    "einv": ("einv_adapter", "E-Invoice", None),
+    "ewb": ("ewb_adapter", "E-Way Bill", None),
+    "ledger_cash": ("ledger_adapter", "Cash Ledger", "cash"),
+    "ledger_credit": ("ledger_adapter", "Credit Ledger", "credit"),
+    "ledger_liability": ("ledger_adapter", "Liability Register", "liability"),
+    "ledger_liability_demand": ("ledger_adapter", "Liability Ledger", "liability_demand"),
+    "portal": ("portal_adapter", "Tax liability and ITC comparison", None),
+    "table8a": ("table8a_adapter", "Table 8A", None),
+    "bo": ("boprofile_adapter", "BO Profile", None),
+    "gstr9": ("gstr9_adapter", "GSTR-9", "gstr9"),
+    "gstr9c": ("gstr9_adapter", "GSTR-9C", "gstr9c"),
+}
+
+
+def process_canonical_preview(source, name, data, work_dir):
+    """
+    Converts ONE file (a merge step's output, or a file dropped in as it is) to its canonical form right away, so
+    the upload step itself can show "converted OK" / the exact issues, instead of only finding out at the end of a
+    full run.
+
+    source: one of CANONICAL_ADAPTERS' keys.
+    name, data: the file's own name and bytes.
+    work_dir: an empty folder to do the work in (caller creates/cleans it).
+
+    This is a PREVIEW, purely additive: it does NOT change what process_full_scrutiny is given (still the file as
+    uploaded / merged, converted again there exactly as before) or anything in the canonical-layer code itself. It
+    costs a few extra seconds of conversion at upload time in exchange for surfacing a mapping problem right away
+    instead of at the end of a full run.
+
+    Returns {"ok": True, "status": "OK"|"OK_WITH_WARNINGS"|"OK_WITH_ERRORS", "source_label": str,
+             "canonical_name": str, "canonical_bytes": bytes,
+             "issues": [{"id","severity","message"}, ...]}   (issues: ERROR/WARNING only)
+    or {"ok": False, "source_label": str, "error": str} if the file cannot be converted at all
+    (not really a file of that type, a required column missing, ...) -- never raises.
+    """
+    if source not in CANONICAL_ADAPTERS:
+        raise ValueError(f"no canonical layer for {source!r}")
+    module_name, label, extra = CANONICAL_ADAPTERS[source]
+    adapter = importlib.import_module(module_name)
+
+    os.makedirs(work_dir, exist_ok=True)
+    src_path = os.path.join(work_dir, name)
+    with open(src_path, "wb") as f:
+        f.write(data)
+
+    try:
+        canon_data = adapter.build_canonical(src_path) if extra is None else adapter.build_canonical(src_path, extra)
+    except Exception as e:  # noqa: BLE001 - a plain message either way, never a crash mid-upload
+        return {"ok": False, "source_label": label, "error": str(e)}
+
+    out_dir = os.path.join(work_dir, "_canonical")
+    if source == "ewb":                     # the e-way bill canonical file is named after its source file
+        out_path = adapter.write_canonical(canon_data, out_dir, source_path=src_path)
+    else:
+        out_path = adapter.write_canonical(canon_data, out_dir)
+    issues = [{"id": i["id"], "severity": i["severity"], "message": i["message"]}
+              for i in canon_data["issues"] if i["severity"] in ("ERROR", "WARNING")]
+    status = dict(canon_data["meta"]).get("status", "OK")
+    notes = []
+    if source == "gstr3b":                  # a quarterly (QRMP) return: say so, and how the scrutiny will treat it
+        try:
+            units = adapter.quarter_units(src_path)
+        except Exception:  # noqa: BLE001 - the note is a courtesy; never fail the upload over it
+            units = {}
+        if units:
+            notes.append(
+                f"Quarterly GSTR-3B detected ({len(units)} quarter{'s' if len(units) != 1 else ''}: "
+                + ", ".join(f"{ms[0]} to {ms[-1]}" for ms in units.values())
+                + "). The scrutiny will compare each quarter's whole sales and ITC (GSTR-1, E-Invoice, GSTR-2B) with that one return "
+                  "- nothing is spread over months. Provide the GSTR-1 for the whole of each quarter (monthly or quarterly GSTR-1 both work).")
+    return {"ok": True, "status": status, "source_label": label, "canonical_name": os.path.basename(out_path),
+            "canonical_bytes": _read_bytes(out_path), "issues": issues, "notes": notes}
+
+
 def _render_bs_pl_module(bs_pl_data):
     """
     master_build.py does a plain `import bs_pl_input` and reads its
@@ -277,6 +360,38 @@ def process_full_scrutiny(files, bs_pl_data, work_dir):
     import contextlib
     import io
 
+    # Fresh parser caches for every run. The parsers key their caches by (relative) path and the
+    # module stays loaded between runs in the same tab, so without this a second run would silently
+    # reuse the PREVIOUS run's parsed GSTR-2B / HSN data for a different file at the same path.
+    try:
+        import gst_parsers_returns as _pr
+        for _cache in ("_2B_FILE_CACHE", "_HSN_ALL_MONTHS_CACHE"):
+            getattr(_pr, _cache, {}).clear()
+        import gstr2b_adapter as _ad
+        _ad.clear_cache()
+        import gstr3b_adapter as _ad3
+        _ad3.clear_cache()
+        import gstr1_adapter as _ad1
+        _ad1.clear_cache()
+        import einv_adapter as _ade
+        _ade.clear_cache()
+        import ewb_adapter as _adw
+        _adw.clear_cache()
+        import gstr2a_adapter as _ad2a
+        _ad2a.clear_cache()
+        import ledger_adapter as _adl
+        _adl.clear_cache()
+        import table8a_adapter as _ad8
+        _ad8.clear_cache()
+        import gstr9_adapter as _ad9
+        _ad9.clear_cache()
+        import portal_adapter as _adp
+        _adp.clear_cache()
+        import boprofile_adapter as _adbo
+        _adbo.clear_cache()
+    except ImportError:
+        pass
+
     os.makedirs(work_dir, exist_ok=True)
     for name, data in files:
         with open(os.path.join(work_dir, name), "wb") as f:
@@ -305,11 +420,62 @@ def process_full_scrutiny(files, bs_pl_data, work_dir):
     try:
         with contextlib.redirect_stdout(log_buf):
             outfile = master_build.main(".")
-        return {
+        result = {
             "output_name": outfile,
             "output_bytes": _read_bytes(outfile),
             "log": log_buf.getvalue(),
         }
+        # Canonical layers (docs/GSTR2B_CANONICAL_SPEC.md, docs/GSTR3B_CANONICAL_SPEC.md): hand back every
+        # converted file and the warnings/errors found while converting, so the page can show and offer them.
+        cdir = os.path.join(work_dir, "_canonical")
+        result["canonical_files"], result["canonical_issues"] = [], []
+        if os.path.isdir(cdir):
+            for name in sorted(n for n in os.listdir(cdir) if n.endswith(".xlsx")):
+                cpath = os.path.join(cdir, name)
+                result["canonical_files"].append({"name": name, "bytes": _read_bytes(cpath)})
+                try:
+                    if name.startswith("Canonical_GSTR3B_"):
+                        import gstr3b_adapter as _ca
+                        source = "GSTR-3B"
+                    elif name.startswith("Canonical_GSTR1_"):
+                        import gstr1_adapter as _ca
+                        source = "GSTR-1"
+                    elif name.startswith("Canonical_EINV_"):
+                        import einv_adapter as _ca
+                        source = "E-Invoice"
+                    elif name.startswith("Canonical_EWB_"):
+                        import ewb_adapter as _ca
+                        source = "E-Way Bill"
+                    elif name.startswith("Canonical_GSTR2A_"):
+                        import gstr2a_adapter as _ca
+                        source = "GSTR-2A"
+                    elif name.startswith(("Canonical_GSTR9_", "Canonical_GSTR9C_")):
+                        import gstr9_adapter as _ca
+                        source = "GSTR-9C" if name.startswith("Canonical_GSTR9C_") else "GSTR-9"
+                    elif name.startswith("Canonical_PORTALCOMPARISON_"):
+                        import portal_adapter as _ca
+                        source = "Portal comparison"
+                    elif name.startswith("Canonical_TABLE8A_"):
+                        import table8a_adapter as _ca
+                        source = "Table 8A"
+                    elif name.startswith("Canonical_BOPROFILE_"):
+                        import boprofile_adapter as _ca
+                        source = "BO Profile"
+                    elif name.startswith(("Canonical_CASHLEDGER_", "Canonical_CREDITLEDGER_", "Canonical_LIABREGISTER_",
+                                          "Canonical_LIABLEDGER_")):
+                        import ledger_adapter as _ca
+                        source = {"Canonical_CASHLEDGER_": "Cash Ledger", "Canonical_CREDITLEDGER_": "Credit Ledger",
+                                  "Canonical_LIABREGISTER_": "Liability Register",
+                                  "Canonical_LIABLEDGER_": "Liability Ledger"}[name.split("_")[0] + "_" + name.split("_")[1] + "_"]
+                    else:
+                        import gstr2b_adapter as _ca
+                        source = "GSTR-2B"
+                    result["canonical_issues"] += [
+                        {"source": source, "id": i["id"], "severity": i["severity"], "message": i["message"]}
+                        for i in _ca.read_canonical(cpath)["issues"] if i["severity"] in ("ERROR", "WARNING")]
+                except Exception:  # noqa: BLE001 - notes are a nicety, never fail the run over them
+                    pass
+        return result
     finally:
         os.chdir(prev_cwd)
 

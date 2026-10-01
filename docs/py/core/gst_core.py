@@ -83,6 +83,72 @@ def fy_years(fy):
     return y1, y2
 
 
+# ---------------------------------------------------------------------------------------------------
+# PERIOD UNITS - a quarterly filer (QRMP) files ONE GSTR-3B for three months. The engine then analyses
+# that quarter as ONE period, labelled by the quarter's LAST month (e.g. 'Jun-25' = Apr-Jun 2025), and the
+# readers that serve a "month" (GSTR-1, E-Invoice, GSTR-2B, e-way bills) answer an anchor label with the
+# TOTAL of its months. A monthly filer has no units, so nothing changes for one.
+# ---------------------------------------------------------------------------------------------------
+PERIOD_UNITS = {}          # anchor label -> [month labels of that period, in calendar order]
+
+
+def set_period_units(units):
+    """Replace the registry (anchor -> months). Only multi-month units are kept."""
+    PERIOD_UNITS.clear()
+    for anchor, ms in (units or {}).items():
+        if len(ms) > 1:
+            PERIOD_UNITS[anchor] = list(ms)
+
+
+def unit_months(label):
+    """The months a period label stands for: [label] for a month, the quarter's months for a quarter's anchor."""
+    return PERIOD_UNITS.get(label) or [label]
+
+
+def unit_of(month):
+    """(anchor, months) of the multi-month unit that contains `month`, or None."""
+    for anchor, ms in PERIOD_UNITS.items():
+        if month in ms:
+            return anchor, ms
+    return None
+
+
+PARTIAL_UNITS = {}      # anchor -> months of that quarter for which the GSTR-1 (or 3B) has no data
+
+
+def period_title(label):
+    """'Jun-25' for a monthly period; 'Jun-25 (QUARTER Apr-25 to Jun-25, GSTR-3B filed quarterly)' for a quarter's anchor."""
+    ms = PERIOD_UNITS.get(label)
+    if ms and len(ms) > 1:
+        t = f"{label} (QUARTER {ms[0]} to {ms[-1]}, quarterly return)"
+        if PARTIAL_UNITS.get(label):
+            t += (f"  --  INCOMPLETE INPUT: {', '.join(PARTIAL_UNITS[label])} missing from the GSTR-1 file, so this quarter's "
+                  f"sales comparison is NOT reliable")
+        return t
+    return label
+
+
+_QUARTER_NAMES = {1: "APR-JUN", 2: "JUL-SEP", 3: "OCT-DEC", 4: "JAN-MAR"}
+
+
+def _normalise_tax_period(tax_period):
+    """Upper-case Tax Period text with the spellings a quarterly return may carry folded onto the three the parser knows
+    (month name / 'Apr-Jun' / numeric MMYYYY): 'Jan - Mar', 'January-March', 'Jan-Mar 2024', 'January to March', a range
+    inside brackets, and 'Quarter 4' / 'Qtr-4' / 'Q4' (Q1 = Apr-Jun ... Q4 = Jan-Mar). Anything else is returned unchanged
+    (upper-cased) and rejected by the caller exactly as before."""
+    tp = str(tax_period).strip().upper()
+    m = re.fullmatch(r"(?:QUARTER|QTR|Q)\s*-?\s*([1-4])(?:\s*\(.*\))?", tp)
+    if m:
+        return _QUARTER_NAMES[int(m.group(1))]
+    m = re.search(r"\b([A-Z]{3,9})\s*(?:-|TO)\s*([A-Z]{3,9})\b", tp)
+    if m and m.group(1)[:3] in MONTH_NAME_TO_NUM_3 and m.group(2)[:3] in MONTH_NAME_TO_NUM_3:
+        return f"{m.group(1)[:3]}-{m.group(2)[:3]}"
+    return tp
+
+
+MONTH_NAME_TO_NUM_3 = {k for k in MONTH_NAME_TO_NUM if len(k) == 3}
+
+
 def months_for_tax_period(fy, tax_period):
     """Return list of 'Mon-YY' calendar-month labels this marker covers.
     1 label for a month marker, 3 for a quarter marker. Raises PeriodParseError
@@ -90,7 +156,7 @@ def months_for_tax_period(fy, tax_period):
     MMYYYY, or a quarter like 'Apr-Jun') -- stays flexible across formats
     since real files may use any of the three, but does not guess beyond them."""
     y1, y2 = fy_years(fy)
-    tp = tax_period.strip().upper()
+    tp = _normalise_tax_period(tax_period)
 
     if re.match(r"^\d{6}$", tp):                 # numeric MMYYYY, e.g. '042022'
         month_nums = [int(tp[:2])]
@@ -196,6 +262,33 @@ def find_block_for_month(all_rows, month_label):
     )
 
 
+def find_blocks_for_month(all_rows, month_label):
+    """Like find_block_for_month, but returns EVERY (start, end) block whose marker covers
+    `month_label`, in sheet order -- not just the first.
+
+    Why: the GST portal caps a document-wise GSTR-2B download at 1,000 rows per sheet and
+    offers the remainder as a second file for the SAME period. Merging both yields two marker
+    blocks for one month (confirmed real: October 2024 = 1,000 + 326 B2B rows, 0 overlap).
+    find_block_for_month() sees only the first, so the other 326 invoices were silently ignored.
+    Raises PeriodParseError if no marker covers the month, exactly like find_block_for_month."""
+    marker_positions = []
+    for i, row in enumerate(all_rows):
+        if is_marker_row(row):
+            _, _, labels = parse_marker_text(str(row[0]))
+            marker_positions.append((i, labels))
+    blocks = []
+    for idx, (row_idx, labels) in enumerate(marker_positions):
+        if month_label in labels:
+            end = marker_positions[idx + 1][0] if idx + 1 < len(marker_positions) else len(all_rows)
+            blocks.append((row_idx + 1, end))
+    if not blocks:
+        raise PeriodParseError(
+            f"Month {month_label!r} not covered by any period marker in this sheet. "
+            f"Markers found: {[lbl for _, lbl in marker_positions]}"
+        )
+    return blocks
+
+
 def find_block_and_index_for_month(all_rows, month_label):
     """Like find_block_for_month, but ALSO returns WHICH position (0-based)
     month_label occupies within its marker's own label list, and how many
@@ -271,6 +364,34 @@ def _sheetnames(path):
     return sn
 
 
+_GSTR2B_TITLE_RE = re.compile(r"GSTR[\s-]*2B", re.I)
+
+
+def _looks_like_gstr2b_by_title(path):
+    """Content signature for a GSTR-2B workbook that does NOT depend on the 'Read me'
+    sheet, the 'ITC Available' sheet, or which optional sheets (B2BA, ...) happen to be
+    present: every 2B line-item sheet carries the form title ('Goods and Services Tax  -
+    GSTR-2B', or '... GSTR-2B (Quarterly)') in the first rows, exactly like GSTR-2A carries
+    'GSTR 2A' (see _looks_like_r2a_merged) and Table 8A carries 'GSTR-8A'.
+
+    Reason this exists: the earlier shape-only rules missed a real merged 2B whose sheets
+    were {B2B, B2BA, B2B-CDNR} -- no 'Read me', no 'ITC Available', but WITH 'B2BA' -- so
+    it matched none of them, was never classified as GSTR-2B, and every 2B-dependent check
+    then reported 'GSTR-2B not supplied'. Title text is the safer signal."""
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    try:
+        for sn in ("B2B", "B2B-CDNR", "B2BA", "B2B-CDNRA", "ITC Available"):
+            if sn not in wb.sheetnames:
+                continue
+            for row in wb[sn].iter_rows(min_row=1, max_row=4, values_only=True):
+                for c in row:
+                    if c and _GSTR2B_TITLE_RE.search(str(c)):
+                        return True
+    finally:
+        wb.close()
+    return False
+
+
 def _looks_like_r2a_merged(path):
     """Content signature for the merged GSTR-2A workbook: its own sheets carry
     the literal 'GSTR 2A' / 'GSTR-2A' / 'GSTR2A' banner text (spacing/hyphen
@@ -302,10 +423,233 @@ def _looks_like_r2a_merged(path):
     return False
 
 
+def use_canonical_1(path):
+    """True when GSTR-1 should be read through the canonical layer (gstr1_adapter.py): the switch
+    gst_config.GSTR1_USE_CANONICAL (or env GST_1_CANONICAL=1/0) is on, or `path` already IS a canonical
+    GSTR-1 workbook."""
+    env = os.environ.get("GST_1_CANONICAL")
+    if env is not None:
+        on = env.strip() == "1"
+    else:
+        try:
+            import gst_config
+            on = bool(getattr(gst_config, "GSTR1_USE_CANONICAL", False))
+        except ImportError:
+            on = False
+    if on:
+        return True
+    try:
+        import gstr1_adapter
+        return gstr1_adapter.is_canonical_file(path)
+    except ImportError:
+        return False
+
+
+def use_canonical_3b(path):
+    """True when GSTR-3B should be read through the canonical layer (gstr3b_adapter.py): the switch
+    gst_config.GSTR3B_USE_CANONICAL (or env GST_3B_CANONICAL=1/0) is on, or `path` already IS a
+    canonical 3B workbook."""
+    env = os.environ.get("GST_3B_CANONICAL")
+    if env is not None:
+        on = env.strip() == "1"
+    else:
+        try:
+            import gst_config
+            on = bool(getattr(gst_config, "GSTR3B_USE_CANONICAL", False))
+        except ImportError:
+            on = False
+    if on:
+        return True
+    try:
+        import gstr3b_adapter
+        return gstr3b_adapter.is_canonical_file(path)
+    except ImportError:
+        return False
+
+
+def use_canonical_einv(path):
+    """True when the E-Invoice should be read through the canonical layer (einv_adapter.py): the switch
+    gst_config.EINV_USE_CANONICAL (or env GST_EINV_CANONICAL=1/0) is on, or `path` already IS a canonical
+    E-Invoice workbook."""
+    env = os.environ.get("GST_EINV_CANONICAL")
+    if env is not None:
+        on = env.strip() == "1"
+    else:
+        try:
+            import gst_config
+            on = bool(getattr(gst_config, "EINV_USE_CANONICAL", False))
+        except ImportError:
+            on = False
+    if on:
+        return True
+    try:
+        import einv_adapter
+        return einv_adapter.is_canonical_file(path)
+    except ImportError:
+        return False
+
+
+def use_canonical_ewb(path):
+    """True when an e-way bill file should be read through the canonical layer (ewb_adapter.py): the
+    switch gst_config.EWB_USE_CANONICAL (or env GST_EWB_CANONICAL=1/0) is on, or `path` already IS a
+    canonical e-way bill workbook."""
+    env = os.environ.get("GST_EWB_CANONICAL")
+    if env is not None:
+        on = env.strip() == "1"
+    else:
+        try:
+            import gst_config
+            on = bool(getattr(gst_config, "EWB_USE_CANONICAL", False))
+        except ImportError:
+            on = False
+    if on:
+        return True
+    try:
+        import ewb_adapter
+        return ewb_adapter.is_canonical_file(path)
+    except ImportError:
+        return False
+
+
+def use_canonical_r2a(path):
+    """True when GSTR-2A should be read through the canonical layer (gstr2a_adapter.py): the switch
+    gst_config.R2A_USE_CANONICAL (or env GST_R2A_CANONICAL=1/0) is on, or `path` already IS a canonical
+    GSTR-2A workbook."""
+    env = os.environ.get("GST_R2A_CANONICAL")
+    if env is not None:
+        on = env.strip() == "1"
+    else:
+        try:
+            import gst_config
+            on = bool(getattr(gst_config, "R2A_USE_CANONICAL", False))
+        except ImportError:
+            on = False
+    if on:
+        return True
+    try:
+        import gstr2a_adapter
+        return gstr2a_adapter.is_canonical_file(path)
+    except ImportError:
+        return False
+
+
+def use_canonical_ledger(path):
+    """True when a ledger CSV should be read through the canonical layer (ledger_adapter.py): the switch
+    gst_config.LEDGER_USE_CANONICAL (or env GST_LEDGER_CANONICAL=1/0) is on, or `path` already IS a canonical
+    ledger workbook."""
+    env = os.environ.get("GST_LEDGER_CANONICAL")
+    if env is not None:
+        on = env.strip() == "1"
+    else:
+        try:
+            import gst_config
+            on = bool(getattr(gst_config, "LEDGER_USE_CANONICAL", False))
+        except ImportError:
+            on = False
+    if on:
+        return True
+    try:
+        import ledger_adapter
+        return ledger_adapter.is_canonical_file(path)
+    except ImportError:
+        return False
+
+
+def use_canonical_t8a(path):
+    """True when the Table 8A workbook should be read through the canonical layer (table8a_adapter.py): the switch
+    gst_config.TABLE8A_USE_CANONICAL (or env GST_T8A_CANONICAL=1/0) is on, or `path` already IS a canonical the Table 8A workbook workbook."""
+    env = os.environ.get("GST_T8A_CANONICAL")
+    if env is not None:
+        on = env.strip() == "1"
+    else:
+        try:
+            import gst_config
+            on = bool(getattr(gst_config, "TABLE8A_USE_CANONICAL", False))
+        except ImportError:
+            on = False
+    if on:
+        return True
+    try:
+        import table8a_adapter
+        return table8a_adapter.is_canonical_file(path)
+    except ImportError:
+        return False
+
+
+def use_canonical_bo(path):
+    """True when the BO Profile workbook should be read through the canonical layer (boprofile_adapter.py): the switch
+    gst_config.BOPROFILE_USE_CANONICAL (or env GST_BO_CANONICAL=1/0) is on, or `path` already IS a canonical the BO Profile workbook workbook."""
+    env = os.environ.get("GST_BO_CANONICAL")
+    if env is not None:
+        on = env.strip() == "1"
+    else:
+        try:
+            import gst_config
+            on = bool(getattr(gst_config, "BOPROFILE_USE_CANONICAL", False))
+        except ImportError:
+            on = False
+    if on:
+        return True
+    try:
+        import boprofile_adapter
+        return boprofile_adapter.is_canonical_file(path)
+    except ImportError:
+        return False
+
+
+def use_canonical_r9(path):
+    """True when GSTR-9 / GSTR-9C should be read through the canonical layer (gstr9_adapter.py): the switch
+    gst_config.GSTR9_USE_CANONICAL (or env GST_R9_CANONICAL=1/0) is on, or `path` already IS a canonical GSTR-9 / 9C workbook."""
+    env = os.environ.get("GST_R9_CANONICAL")
+    if env is not None:
+        on = env.strip() == "1"
+    else:
+        try:
+            import gst_config
+            on = bool(getattr(gst_config, "GSTR9_USE_CANONICAL", False))
+        except ImportError:
+            on = False
+    if on:
+        return True
+    try:
+        import gstr9_adapter
+        return gstr9_adapter.is_canonical_file(path)
+    except ImportError:
+        return False
+
+
+def use_canonical_portal(path):
+    """True when the portal comparison report should be read through the canonical layer (portal_adapter.py): the switch
+    gst_config.PORTAL_USE_CANONICAL (or env GST_PORTAL_CANONICAL=1/0) is on, or `path` already IS a canonical portal-comparison workbook."""
+    env = os.environ.get("GST_PORTAL_CANONICAL")
+    if env is not None:
+        on = env.strip() == "1"
+    else:
+        try:
+            import gst_config
+            on = bool(getattr(gst_config, "PORTAL_USE_CANONICAL", False))
+        except ImportError:
+            on = False
+    if on:
+        return True
+    try:
+        import portal_adapter
+        return portal_adapter.is_canonical_file(path)
+    except ImportError:
+        return False
+
+
 def _looks_like_gstr3b_merged(path):
     """Content signature for the merged GSTR-3B workbook: at least one sheet
     contains the literal 'Form GSTR-3B' banner text. Sheet NAMES (e.g.
-    'Jan_2022-23') are never consulted, per instruction."""
+    'Jan_2022-23') are never consulted, per instruction. A canonical 3B workbook (META + RETURNS +
+    LINES sheets, see gstr3b_adapter.py) is recognised by its schema_version."""
+    try:
+        import gstr3b_adapter
+        if gstr3b_adapter.is_canonical_file(path):
+            return True
+    except ImportError:
+        pass
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
         for sn in wb.sheetnames:
@@ -318,6 +662,13 @@ def _looks_like_gstr3b_merged(path):
 
 
 def _gstr1_months(path):
+    if use_canonical_1(path):
+        import gstr1_adapter
+        return gstr1_adapter.months(path)
+    return _gstr1_months_raw(path)
+
+
+def _gstr1_months_raw(path):
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
         ws = wb["b2b, sez, de_inv"]
@@ -328,6 +679,13 @@ def _gstr1_months(path):
 
 
 def _einv_months(path):
+    if use_canonical_einv(path):
+        import einv_adapter
+        return einv_adapter.months(path)
+    return _einv_months_raw(path)
+
+
+def _einv_months_raw(path):
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
         ws = wb["b2b, sez, de"]
@@ -348,6 +706,12 @@ def _gstr2b_months(path):
     recognised it as a GSTR-2B file. 'B2B' carries the identical period-marker format ('Financial
     Year: ... | Tax Period: ...' rows) -- confirmed directly against this taxpayer's real file --
     so it's a safe, equivalent fallback source for month coverage when 'ITC Available' is absent."""
+    try:
+        import gstr2b_adapter
+        if gstr2b_adapter.is_canonical_file(path):
+            return gstr2b_adapter.months_from_canonical(path)
+    except ImportError:
+        pass
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
         sheet_name = "ITC Available" if "ITC Available" in wb.sheetnames else "B2B"
@@ -361,6 +725,13 @@ def _gstr2b_months(path):
 
 
 def _gstr3b_months(path):
+    if use_canonical_3b(path):
+        import gstr3b_adapter
+        return gstr3b_adapter.months(path)
+    return _gstr3b_months_raw(path)
+
+
+def _gstr3b_months_raw(path):
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     months = set()
     try:
@@ -388,6 +759,40 @@ def _gstr3b_months(path):
     return months
 
 
+def _gstr3b_gstin_and_name(path):
+    if use_canonical_3b(path):
+        import gstr3b_adapter
+        return gstr3b_adapter.gstin_and_name(path)
+    return _gstr3b_gstin_and_name_raw(path)
+
+
+def _gstr3b_gstin_and_name_raw(path):
+    """(GSTIN, Legal name) from the header block of the first sheet of a merged GSTR-3B that
+    has them, read by label ('GSTIN', 'Legal name of the registered person') -- content, not
+    position. Returns (None, None) for whatever it can't find; never guesses."""
+    gstin_re = re.compile(r"^\d{2}[A-Z]{5}\d{4}[A-Z]\d[A-Z][A-Z\d]$")
+    gstin = name = None
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    try:
+        for sn in wb.sheetnames:
+            for i, row in enumerate(wb[sn].iter_rows(values_only=True)):
+                if i > 30:
+                    break
+                cells = [str(c).strip() for c in row if c not in (None, "")]
+                if len(cells) < 2:
+                    continue
+                label = cells[0].lower()
+                if label == "gstin" and gstin_re.match(cells[1].upper()):
+                    gstin = gstin or cells[1].upper()
+                elif label.startswith("legal name"):
+                    name = name or cells[1]
+            if gstin and name:
+                break
+    finally:
+        wb.close()
+    return gstin, name
+
+
 def _csv_first_line(path):
     with open(path, newline="", encoding="utf-8-sig") as f:
         for row in csv.reader(f):
@@ -398,6 +803,13 @@ def _csv_first_line(path):
 
 
 def _read_me_gstin_and_name(gstr1_path):
+    if use_canonical_1(gstr1_path):
+        import gstr1_adapter
+        return gstr1_adapter.gstin_and_name(gstr1_path)
+    return _read_me_gstin_and_name_raw(gstr1_path)
+
+
+def _read_me_gstin_and_name_raw(gstr1_path):
     """Content-based GSTIN + Legal Name from the merged GSTR-1's 'Read me' sheet."""
     wb = openpyxl.load_workbook(gstr1_path, read_only=True, data_only=True)
     try:
@@ -494,6 +906,42 @@ def _first_row_lower(path, sheet_name):
         wb.close()
 
 
+_GSTIN_HDR_RE = re.compile(r"\b(\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z])\b")
+
+
+def _gstin_from_headers(paths, max_rows=40):
+    """The GSTIN most often stated in the header (first rows) of the given xlsx / csv files: a cell with a 'GSTIN' label next
+    to a GSTIN, or a 'GSTIN: 05ABC...' style cell. Never raises; None if nothing is found."""
+    from collections import Counter
+    votes = Counter()
+    for p in paths:
+        try:
+            if str(p).lower().endswith(".csv"):
+                with open(p, newline="", encoding="utf-8-sig", errors="replace") as f:
+                    rows = [r for _, r in zip(range(max_rows), csv.reader(f))]
+                sheets = [rows]
+            else:
+                wb = openpyxl.load_workbook(p, read_only=True, data_only=True)
+                try:
+                    sheets = [[list(r) for _, r in zip(range(max_rows), wb[sn].iter_rows(values_only=True))] for sn in wb.sheetnames[:6]]
+                finally:
+                    wb.close()
+            found = set()
+            for rows in sheets:
+                for r in rows:
+                    cells = [str(c).strip() for c in r if c not in (None, "")]
+                    for i, c in enumerate(cells):
+                        if "gstin" in c.lower():
+                            m = _GSTIN_HDR_RE.search(c.upper()) or (_GSTIN_HDR_RE.search(cells[i + 1].upper()) if i + 1 < len(cells) else None)
+                            if m:
+                                found.add(m.group(1))
+            for g in found:
+                votes[g] += 1
+        except Exception:  # noqa: BLE001 - a file we cannot peek into simply does not vote
+            continue
+    return votes.most_common(1)[0][0] if votes else None
+
+
 def classify_folder(folder="."):
     xlsx = sorted(glob.glob(os.path.join(folder, "*.xlsx")) + glob.glob(os.path.join(folder, "*.xlsm")))
     csvs = sorted(glob.glob(os.path.join(folder, "*.csv")))
@@ -507,6 +955,7 @@ def classify_folder(folder="."):
     # FY's data was silently discarded without any error or warning.
     gstr1_files, gstr3b_files, einv_files, gstr2b_files = [], [], [], []
     portal_comparison_files, ewb_candidates = [], []
+    canon_ledgers = []          # (path, kind) of canonical ledger workbooks supplied as input
     bo_profile_files = []
     gstr9_files, gstr9c_files, table8a_files, bs_pl_files = [], [], [], []
     hsn_sac_master_files = []
@@ -518,17 +967,99 @@ def classify_folder(folder="."):
         sn = set(_sheetnames(f))
         if not sn:
             continue
-        if "b2b, sez, de_inv" in sn and "hsn" in sn:
+        # A canonical GSTR-1 workbook (META + RETURNS + COVERAGE, see gstr1_adapter.py) is recognised first.
+        if "META" in sn and "COVERAGE" in sn and "RETURNS" in sn:
+            try:
+                import gstr1_adapter
+                if gstr1_adapter.is_canonical_file(f):
+                    gstr1_files.append(f); continue
+            except ImportError:
+                pass
+        # Table 12 (HSN) is the single 'hsn' tab in older exports and 'hsn(b2b)' + 'hsn(b2c)' in newer ones
+        # (the same file can even mix both): any of them makes this a GSTR-1.
+        if "b2b, sez, de_inv" in sn and ("hsn" in sn or "hsn(b2b)" in sn or "hsn(b2c)" in sn):
             gstr1_files.append(f); continue
+        # A canonical GSTR-2B workbook (written by gstr2b_adapter.py -- see docs/GSTR2B_CANONICAL_SPEC.md)
+        # is recognised by its META sheet's schema_version, before any shape rule below.
+        if "META" in sn and "B2B" in sn and "MAPPING_REPORT" in sn:
+            try:
+                import gstr2b_adapter
+                if gstr2b_adapter.is_canonical_file(f):
+                    gstr2b_files.append(f); continue
+            except ImportError:
+                pass
         if "ITC Available" in sn and "B2B" in sn:
             gstr2b_files.append(f); continue
+        # GSTR-2B with the 'Read me' sheet missing (and possibly 'ITC Available' too),
+        # any B2BA/CDNRA combination: decided by the form title, not by sheet names.
+        # Only files WITHOUT 'Read me' are considered here -- a 2A / Table 8A file always
+        # has one, and those are still routed by their own checks further down.
+        if ("Read me" not in sn and ("B2B" in sn or "B2B-CDNR" in sn)
+                and _looks_like_gstr2b_by_title(f)):
+            gstr2b_files.append(f); continue
+        # A canonical E-Invoice workbook (written by einv_adapter.py -- docs/EINV_CANONICAL_SPEC.md).
+        if "META" in sn and "EINV_B2B" in sn and "MAPPING_REPORT" in sn:
+            try:
+                import einv_adapter
+                if einv_adapter.is_canonical_file(f):
+                    einv_files.append(f); continue
+            except ImportError:
+                pass
+        # A canonical ledger workbook (written by ledger_adapter.py -- docs/LEDGER_CANONICAL_SPEC.md).
+        if "META" in sn and "LEDGER_ROWS" in sn and "MAPPING_REPORT" in sn:
+            try:
+                import ledger_adapter
+                _lk = ledger_adapter.canonical_kind(f)
+                if _lk:
+                    canon_ledgers.append((f, _lk)); continue
+            except ImportError:
+                pass
+        # A canonical GSTR-2A workbook (written by gstr2a_adapter.py -- docs/GSTR2A_CANONICAL_SPEC.md).
+        if "META" in sn and "R2A_B2B" in sn and "MAPPING_REPORT" in sn:
+            try:
+                import gstr2a_adapter
+                if gstr2a_adapter.is_canonical_file(f):
+                    r2a_files.append(f); continue
+            except ImportError:
+                pass
         if "b2b, sez, de" in sn and "b2b, sez, de_inv" not in sn:
             einv_files.append(f); continue
+        if "META" in sn and "COMPARISON_ROWS" in sn and "MAPPING_REPORT" in sn:      # canonical (portal_adapter.py)
+            try:
+                import portal_adapter
+                if portal_adapter.is_canonical_file(f):
+                    portal_comparison_files.append(f); continue
+            except ImportError:
+                pass
         if "Comparison Summary" in sn:
             portal_comparison_files.append(f); continue
         # GSTR-9 / GSTR-9C / BO Profile: now supplied as Excel exports (previously PDF --
         # the PDF-classification path for these three was removed; nothing else in this
         # tool parses a PDF, so there is no PDF fallback for these three doc types).
+        # Canonical GSTR-9 / GSTR-9C workbooks (gstr9_adapter.py).
+        if "META" in sn and "R9_FACTS" in sn and "MAPPING_REPORT" in sn:
+            try:
+                import gstr9_adapter
+                _rf = gstr9_adapter.canonical_form(f)
+                if _rf == "gstr9c":
+                    gstr9c_files.append(f); continue
+                if _rf == "gstr9":
+                    gstr9_files.append(f); continue
+            except ImportError:
+                pass
+        # Canonical BO Profile / Table 8A workbooks (boprofile_adapter.py / table8a_adapter.py).
+        if "META" in sn and "MAPPING_REPORT" in sn:
+            try:
+                if "BO_DEMOGRAPHIC" in sn:
+                    import boprofile_adapter
+                    if boprofile_adapter.is_canonical_file(f):
+                        bo_profile_files.append(f); continue
+                if "T8A_B2B" in sn:
+                    import table8a_adapter
+                    if table8a_adapter.is_canonical_file(f):
+                        table8a_files.append(f); continue
+            except ImportError:
+                pass
         if _looks_like_gstr9c_excel(sn):
             gstr9c_files.append(f); continue
         if _looks_like_gstr9_excel(sn):
@@ -584,6 +1115,17 @@ def classify_folder(folder="."):
             machinery_hsn_master_files.append(f); continue
         if _looks_like_gstr3b_merged(f):
             gstr3b_files.append(f); continue
+        # A canonical e-way bill workbook (written by ewb_adapter.py -- see docs/EWB_CANONICAL_SPEC.md) is
+        # recognised by its META sheet's schema_version, before the raw header scan below -- its own
+        # EWB_ROWS sheet uses canonical field names, not the portal's own headings, so the raw scan alone
+        # would never find it and the file would be silently dropped.
+        if "META" in sn and "EWB_ROWS" in sn and "MAPPING_REPORT" in sn:
+            try:
+                import ewb_adapter
+                if ewb_adapter.is_canonical_file(f):
+                    ewb_candidates.append(f); continue
+            except ImportError:
+                pass
         # Annual EWB: has 'EWB No.' + 'From GSTIN & Name' header on some sheet
         wb = openpyxl.load_workbook(f, read_only=True, data_only=True)
         found_ewb = False
@@ -649,6 +1191,9 @@ def classify_folder(folder="."):
             liab_register_files.append(c)
         elif "liability ledger" in line:
             liab_demand_files.append(c)
+    for _f, _k in canon_ledgers:
+        {"cash": cash_ledgers, "credit": credit_ledgers, "liability": liab_register_files,
+         "liability_demand": liab_demand_files}[_k].append(_f)
 
     # self_gstin / company_name refinement from the FIRST merged GSTR-1's Read me sheet
     company_name = None
@@ -656,7 +1201,43 @@ def classify_folder(folder="."):
         g1_gstin, g1_name = _read_me_gstin_and_name(gstr1_files[0])
         self_gstin = self_gstin or g1_gstin
         company_name = g1_name
+    # Third source, for when the GSTR-1 'Read me' is missing (or unreadable) AND there are no
+    # e-way bill files to infer the GSTIN from: the taxpayer's own GSTR-3B sheets state both
+    # GSTIN and Legal name in-sheet. Only ever fills what is still empty -- never overrides.
+    if (not self_gstin or not company_name) and gstr3b_files:
+        try:
+            g3_gstin, g3_name = _gstr3b_gstin_and_name(gstr3b_files[0])
+        except Exception as ex:      # an unreadable 3B (e.g. an unrecognised Tax Period) must not stop the fallbacks below
+            print(f"[warn] Could not read the GSTIN from the GSTR-3B ({ex}); trying the other supplied files.")
+            g3_gstin, g3_name = None, None
+        self_gstin = self_gstin or g3_gstin
+        company_name = company_name or g3_name
+    # Last resort: every other file the taxpayer supplied that states the GSTIN in its own header (BO Profile, GSTR-9 / 9C,
+    # Table 8A, GSTR-2A / 2B, the four ledger CSVs, the portal comparison report). Most frequent GSTIN wins.
+    if not self_gstin:
+        _others = (list(bo_profile_files) + list(gstr9_files) + list(gstr9c_files) + list(table8a_files) + list(r2a_files)
+                   + list(gstr2b_files) + list(portal_comparison_files) + list(csvs))
+        self_gstin = _gstin_from_headers(_others)
+        if self_gstin:
+            print(f"[info] Taxpayer GSTIN {self_gstin} taken from the header of the other supplied files "
+                  f"(no e-way bill file, GSTR-1 'Read me' or readable GSTR-3B).")
 
+    # The E-Invoice download states no GSTIN of its own, so its canonical file is named from the taxpayer's.
+    try:
+        import einv_adapter
+        einv_adapter.set_context(gstin=self_gstin)
+    except ImportError:
+        pass
+    # An e-way bill export states no GSTIN of its own either -- self_gstin is in fact DERIVED from these
+    # very files a few lines above, so a canonical e-way bill file built during that direction-detection
+    # pass (above) is unavoidably named 'UNKNOWN' (the classic chicken-and-egg: the context isn't known
+    # until after the file has already been parsed once). This call only helps a build that happens after
+    # this point.
+    try:
+        import ewb_adapter
+        ewb_adapter.set_context(gstin=self_gstin)
+    except ImportError:
+        pass
     gstr1_month_map, w1 = _build_month_file_map(gstr1_files, _gstr1_months, "GSTR-1")
     gstr3b_month_map, w2 = _build_month_file_map(gstr3b_files, _gstr3b_months, "GSTR-3B")
     einv_month_map, w3 = _build_month_file_map(einv_files, _einv_months, "E-Invoice")
