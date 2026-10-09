@@ -1,0 +1,15 @@
+name = "gst-telegram-relay"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+[vars]
+CHAT_ID = "-1003983852908"
+
+# Daily summary 9:00 pm IST (15:30 UTC); monthly summary 9:00 am IST on the 1st (03:30 UTC).
+[triggers]
+crons = ["30 15 * * *", "30 3 1 * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "gst-runs"
+database_id = "22c68258-6a95-4a8b-a82e-4ac3a6da4ff9"

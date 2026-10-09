@@ -417,13 +417,24 @@ def process_full_scrutiny(files, bs_pl_data, work_dir):
     prev_cwd = os.getcwd()
     os.chdir(work_dir)
     log_buf = io.StringIO()
+    # Observe (never alter) the BO Profile master_build parses, purely to read
+    # the taxpayer's legal/trade name for the team-notification message.
+    _bo_seen = {}
+    _orig_safe_parse_bo = master_build._safe_parse_bo
+    def _spy_safe_parse_bo(path):
+        r = _orig_safe_parse_bo(path)
+        _bo_seen["bo"] = r
+        return r
+    master_build._safe_parse_bo = _spy_safe_parse_bo
     try:
         with contextlib.redirect_stdout(log_buf):
             outfile = master_build.main(".")
+        _bo = _bo_seen.get("bo") or {}
         result = {
             "output_name": outfile,
             "output_bytes": _read_bytes(outfile),
             "log": log_buf.getvalue(),
+            "taxpayer_name": _bo.get("legal_name") or _bo.get("trade_name") or None,
         }
         # Canonical layers (docs/GSTR2B_CANONICAL_SPEC.md, docs/GSTR3B_CANONICAL_SPEC.md): hand back every
         # converted file and the warnings/errors found while converting, so the page can show and offer them.
@@ -477,6 +488,7 @@ def process_full_scrutiny(files, bs_pl_data, work_dir):
                     pass
         return result
     finally:
+        master_build._safe_parse_bo = _orig_safe_parse_bo
         os.chdir(prev_cwd)
 
 
