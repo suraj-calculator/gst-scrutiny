@@ -311,10 +311,12 @@ def run_checks(g1, g3b, einv, b2b, g1_lines, einv_lines):
     rows3 = []
     worst = PASS
     for i, h in enumerate(heads):
-        should = gv("4A5", i) + gv("4A3", i) - gv("4B1", i) - gv("4B2", i)
+        # 4A1/4A2/4A4 (imports, ISD) are part of 4A too; they were left out and only worked because they were 0.
+        should = (gv("4A1", i) + gv("4A2", i) + gv("4A4", i) + gv("4A5", i) + gv("4A3", i)
+                  - gv("4B1", i) - gv("4B2", i))
         actual = gv("4C", i)
         d = round(should - actual, 2)
-        rows3.append(f"{h}: 4A5 {gv('4A5',i):,.2f} + 4A3 {gv('4A3',i):,.2f} - 4B1 {gv('4B1',i):,.2f} "
+        rows3.append(f"{h}: 4A1+4A2+4A4 {gv('4A1',i)+gv('4A2',i)+gv('4A4',i):,.2f} + 4A5 {gv('4A5',i):,.2f} + 4A3 {gv('4A3',i):,.2f} - 4B1 {gv('4B1',i):,.2f} "
                      f"- 4B2 {gv('4B2',i):,.2f} = {should:,.2f}  | 3B 4C {actual:,.2f}  | diff {d:,.2f}")
         if abs(d) > TOL:
             worst = FLAG

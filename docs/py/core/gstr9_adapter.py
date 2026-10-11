@@ -329,7 +329,18 @@ def parse_gstr9(path):
         else:
             out["notes"].append("Table 6A (ITC availed via 3B) row not found.")
         if "t6_total" in facts:
-            out["table6_total_itc_availed"] = s("t6_total", (3, 4, 5, 6))
+            # Row 6O has no blank "Type" cell in the real portal export, so its four heads sit in
+            # columns 2-5 while 6A's sit in 3-6. Taking the row's first four numbers (not fixed columns)
+            # reads both layouts; the fixed 3-6 read dropped CGST (842.09M instead of 887.41M).
+            _vals = []
+            for _i in range(2, 8):
+                try:
+                    _v = c("t6_total", _i)
+                except (TypeError, ValueError):
+                    _v = None
+                if _v is not None:
+                    _vals.append(_v)
+            out["table6_total_itc_availed"] = sum(_vals[:4])
     else:
         out["notes"].append("Item 6 sheet not found.")
     if has("item7"):

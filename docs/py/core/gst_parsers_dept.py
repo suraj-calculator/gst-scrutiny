@@ -502,7 +502,10 @@ def parse_gstr9(path):
             out["notes"].append("Table 6A (ITC availed via 3B) row not found.")
         r = _gxl_row_by_label(item6, 1, "total itc availed")
         if r:
-            out["table6_total_itc_availed"] = sum(_gxl_num(r[c]) or 0 for c in (3, 4, 5, 6))
+            # Row 6O has no "Type" cell in the real export (heads in columns 2-5, not 3-6): take the
+            # row's first four numbers rather than fixed columns.
+            _vals = [v for v in (_gxl_num(x) for x in r[2:8]) if v is not None]
+            out["table6_total_itc_availed"] = sum(_vals[:4])
     else:
         out["notes"].append("Item 6 sheet not found.")
 

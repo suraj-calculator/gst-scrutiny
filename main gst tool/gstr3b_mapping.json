@@ -79,6 +79,28 @@
         "Non-GST"
       ]
     },
+    "4A1": {
+      "desc": "4(A)(1) ITC on import of goods",
+      "section": {
+        "start": "A. ITC Available",
+        "end": "B. ITC Reversed"
+      },
+      "row_startswith": [
+        "(1) Import of goods"
+      ],
+      "absent_ok": true
+    },
+    "4A2": {
+      "desc": "4(A)(2) ITC on import of services",
+      "section": {
+        "start": "A. ITC Available",
+        "end": "B. ITC Reversed"
+      },
+      "row_startswith": [
+        "(2) Import of services"
+      ],
+      "absent_ok": true
+    },
     "4A3": {
       "desc": "4(A)(3) ITC on inward supplies liable to reverse charge",
       "all": [

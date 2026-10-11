@@ -441,16 +441,22 @@ def month_fields(path, month):
         vals = _floats(ln["values_in_row_order"], ln["n_values"]) if ln else []
         return vals[0] if vals else 0.0
 
+    def all_heads(code):
+        """IGST+CGST+SGST+Cess of a line (a reversal in any head counts)."""
+        ln = lines.get(code)
+        vals = _floats(ln["values_in_row_order"], ln["n_values"]) if ln else []
+        return sum(vals[:4])
+
     fd = ret["arn_date"]
     filing = fd.date() if isinstance(fd, _dt.datetime) else (fd if isinstance(fd, _dt.date) else None)
     return dict(filing_date=filing,
                 rcm_liability_igst=first("3.1d"),        # legacy quirk kept: the name says IGST, the value is the
                                                           # row's first number = taxable value (unused downstream)
-                itc_all_other_igst=first("4A5"),
-                itc_reversed_rule42_43=first("4B1"),     # 4(B)(1), whatever the form's wording (rules 42/43, or
+                itc_all_other_igst=all_heads("4A5"),
+                itc_reversed_rule42_43=all_heads("4B1"),     # 4(B)(1), whatever the form's wording (rules 42/43, or
                                                           # rules 38/42/43 + s.17(5) since Aug-2022)
-                itc_reversed_others=first("4B2"),
-                itc_ineligible_175=first("4D175"))
+                itc_reversed_others=all_heads("4B2"),
+                itc_ineligible_175=all_heads("4D175"))
 
 
 def arn_dates_by_month(path):

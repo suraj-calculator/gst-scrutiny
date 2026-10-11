@@ -85,7 +85,14 @@ def _col(labels, alts):
     """First column whose label contains ALL fragments of the first alternative that hits (the original's _t8a_col chain)."""
     for frags in alts:
         for i, lab in enumerate(labels):
-            if all(fr.lower() in lab.lower() for fr in frags):
+            # A fragment starting with "=" must equal the whole label (ignoring case, spaces, "(%)"):
+            # a plain "rate" also matched "Integrated Tax" ("integRATEd") in the FY24-25 export, so
+            # `rate` silently held the IGST amount.
+            def _hit(fr, lab=lab):
+                if fr.startswith("="):
+                    return re.sub(r"[\s()%]", "", lab.lower()) == re.sub(r"[\s()%]", "", fr[1:].lower())
+                return fr.lower() in lab.lower()
+            if all(_hit(fr) for fr in frags):
                 return i
     return None
 

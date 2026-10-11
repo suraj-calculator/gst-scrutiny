@@ -277,6 +277,7 @@ def parse_gstr1(path, month):
         # (i.e. every month), so this can never carry an invoice identity across a month
         # boundary.
         last_gstin, last_invno = None, None
+        irn_seen, no_irn_primary = False, 0
         for r in mpu.rows_for_month(rows, 3, month):
             if not any(r): continue
             out["taxable"]+=num(r[H.get("Taxable Value")])
@@ -285,11 +286,13 @@ def parse_gstr1(path, month):
             out["SGST"]+=num(r[H.get("State/UT Tax")])
             out["CESS"]+=num(r[H.get("Cess Amount")])
             irn_i=H.get("IRN")
-            if irn_i is None or not str(r[irn_i] if irn_i<len(r) else "").strip():
-                out["b2b_no_irn"]+=1
+            _irn = r[irn_i] if irn_i is not None and irn_i<len(r) else None
+            has_irn_v = _irn is not None and str(_irn).strip() not in ("", "None")   # str(None) is truthy
+            irn_seen = irn_seen or has_irn_v
             raw_gstin = r[c_gstin] if c_gstin is not None and c_gstin < len(r) else None
             raw_invno = r[c_invno] if c_invno is not None and c_invno < len(r) else None
             if raw_gstin not in (None, "") and raw_invno not in (None, ""):
+                if not has_irn_v: no_irn_primary += 1
                 # A primary row -- this is where a "new invoice" is actually counted (a
                 # multi-rate invoice's continuation rows are the SAME invoice, not additional
                 # ones; b2b_count is meant to be an invoice count, not a rate-line count).
@@ -328,6 +331,9 @@ def parse_gstr1(path, month):
                 out["named_IGST"]+=num(r[H.get("Integrated Tax")])
                 out["named_CGST"]+=num(r[H.get("Central Tax")])
                 out["named_SGST"]+=num(r[H.get("State/UT Tax")])
+      # per invoice; if no row carries an IRN the export lacks the column -> not assessable, report 0
+        out["b2b_no_irn"] = no_irn_primary if irn_seen else 0
+        out["irn_column_blank"] = not irn_seen
       except mpu.PeriodParseError:
         out["month_marker_gaps"].append("b2b, sez, de_inv")
 
@@ -383,13 +389,20 @@ def parse_gstr1(path, month):
             rows=list(wb[sn].iter_rows(values_only=True))
             hdr=[str(c).strip() if c else "" for c in rows[3]]
             H={h:i for i,h in enumerate(hdr)}
+            # cn_* = NET REDUCTION of outward supply: credit note (C) +, debit note (D) -, since
+            # every consumer does "invoices - cn_*". Blank Note Type on a multi-rate continuation
+            # row carries the last seen type forward; unknown is treated as a credit note.
+            nt_i = H.get("Note Type"); last_nt = "C"
             for r in mpu.rows_for_month(rows, 3, month):
                 if not any(r): continue
-                out["cn_taxable"]+=num(r[H.get("Taxable Value")]) if "Taxable Value" in H else 0
-                out["cn_IGST"]+=num(r[H.get("Integrated Tax")]) if "Integrated Tax" in H else 0
-                out["cn_CGST"]+=num(r[H.get("Central Tax")]) if "Central Tax" in H else 0
-                out["cn_SGST"]+=num(r[H.get("State/UT Tax")]) if "State/UT Tax" in H else 0
-                out["cn_CESS"]+=num(r[H.get("Cess Amount")]) if "Cess Amount" in H else 0
+                nt = str(r[nt_i]).strip().upper() if nt_i is not None and nt_i < len(r) and r[nt_i] else ""
+                if nt: last_nt = nt
+                sg = -1.0 if last_nt[:1] == "D" else 1.0
+                out["cn_taxable"]+=sg*num(r[H.get("Taxable Value")]) if "Taxable Value" in H else 0
+                out["cn_IGST"]+=sg*num(r[H.get("Integrated Tax")]) if "Integrated Tax" in H else 0
+                out["cn_CGST"]+=sg*num(r[H.get("Central Tax")]) if "Central Tax" in H else 0
+                out["cn_SGST"]+=sg*num(r[H.get("State/UT Tax")]) if "State/UT Tax" in H else 0
+                out["cn_CESS"]+=sg*num(r[H.get("Cess Amount")]) if "Cess Amount" in H else 0
           except mpu.PeriodParseError:
             out["month_marker_gaps"].append(sn)
 
@@ -556,6 +569,10 @@ def parse_gstr3b(path, month):
             g["3.1e"]=nums  # [taxable]
         if "Inward supplies (liable to reverse charge)" in j:
             g["3.1d"]=nums
+        if j.startswith("(1) Import of goods"):
+            g["4A1"]=nums   # [IGST,CGST,SGST,CESS]
+        if j.startswith("(2) Import of services"):
+            g["4A2"]=nums
         if "(5) All other ITC" in j:
             g["4A5"]=nums   # [IGST,CGST,SGST,CESS]
         if "(3) Inward supplies liable to reverse charge" in j:

@@ -211,7 +211,7 @@ def read_gstr3b_extra(path, month):
     '(2) Others' appears in BOTH the 4B and 4D blocks in the pre-Aug-2022
     format, so an unanchored scan silently reads the wrong one)."""
     out = dict(A1=[0.0] * 4, A2=[0.0] * 4, A4=[0.0] * 4, D1=[0.0] * 4, D2=[0.0] * 4,
-               available=False)
+               D1_kind="17(5)", available=False)
     if not path or not os.path.exists(path):
         return out
     wb = pr.load_xlsx(path)
@@ -258,6 +258,10 @@ def read_gstr3b_extra(path, month):
                 continue
             if j.startswith("(1)"):
                 out["D1"] = v[:4]
+                # Meaning of 4(D)(1) changed with the Aug-2022 form: before it was "as per section
+                # 17(5)"; now it is "ITC reclaimed which was reversed under 4(B)(2) in an earlier
+                # period" (the opposite direction -- a re-credit, not a blocked-credit reversal).
+                out["D1_kind"] = "reclaim" if re.search(r"reclaim|4\(B\)\(2\)|earlier", j, re.I) else "17(5)"
             elif j.startswith("(2)"):
                 out["D2"] = v[:4]
     out["available"] = True
@@ -1120,6 +1124,85 @@ def build_zero_tax_scan(ctx):
                 ])
 
 
+def build_credit_reversal_recon(ctx):
+    """CR1 -- Electronic Credit Reversal and Re-claimed Statement vs GSTR-3B 4(B)(2) / 4(D)(1), by
+    tax period and head. The statement is the department's record of the same two lines the taxpayer
+    typed into 3B. Periods filed after the statement's To date are shown as outside the window."""
+    import gst_credit_reversal as cr
+    files = (ctx.get("res") or {}).get("credit_reversal_files") or []
+    header = ["Tax period", "Head", "3B 4(B)(2)", "Statement reversal", "Reversal gap",
+              "3B 4(D)(1)", "Statement reclaim", "Reclaim gap", "Status"]
+    widths = [12, 14, 16, 18, 16, 16, 18, 16, 20]
+    if not files:
+        f = Finding("CR1", "Credit reversal / reclaim reconciliation", "INFO",
+                    "Electronic Credit Reversal and Re-claimed Statement not supplied -- 3B 4(B)(2) and "
+                    "4(D)(1) are therefore not tied to the portal's own record. Download it from the "
+                    "portal (Ledgers > Electronic Credit Reversal and Re-claimed Statement) to run this.", {})
+        return dict(header=header, widths=widths, rows=[["Not supplied"] + [None] * 8],
+                    findings=[f], notes=[])
+    st = cr.parse_credit_reversal_statement(files[0])
+    if not st["available"]:
+        f = Finding("CR1", "Credit reversal / reclaim reconciliation", "INFO",
+                    f"Statement could not be read ({'; '.join(st['issues'])}) -- not reconciled.", {})
+        return dict(header=header, widths=widths, rows=[["Unreadable"] + [None] * 8],
+                    findings=[f], notes=[])
+    rec = cr.reconcile(st, ctx["g3b_by_month"], ctx["g3b_extra_by_month"], ctx["months"])
+    rows = [[l["period"], l["head"], l["g3b_rev"], l["st_rev"], l["rev_gap"], l["g3b_rec"],
+             l["st_rec"], l["rec_gap"], l["status"]] for l in rec["lines"]]
+    bad = [l for l in rec["lines"] if l["status"] == "MISMATCH"]
+    outside = sorted({l["period"] for l in rec["lines"] if l["status"] == "OUTSIDE WINDOW"})
+    old_form = [m for m in ctx["months"]
+                if (ctx["g3b_extra_by_month"].get(m) or {}).get("D1_kind", "17(5)") != "reclaim"
+                and (ctx["g3b_extra_by_month"].get(m) or {}).get("available")]
+    gstin_bad = (st["gstin"] and ctx.get("self_gstin") and st["gstin"] != ctx["self_gstin"])
+    notes = ["Statement covers %s to %s. Compared per tax period and head; |gap| <= Rs 1 is treated as "
+             "rounding." % (st["from_date"], st["to_date"])]
+    if outside:
+        notes.append("Periods " + ", ".join(outside) + " are filed after the statement's To date, so they "
+                     "cannot appear in it -- shown for reference, not counted as mismatches. Download a "
+                     "later statement to reconcile them.")
+    if old_form:
+        notes.append("4(D)(1) is the s.17(5) line (a different item) in the pre-Aug-2022 form, so it is "
+                     "not compared for " + ", ".join(old_form) + "; only 4(B)(2) is.")
+    closing = st["closing"]
+    unclaimed = sum(closing)
+    findings = []
+    if bad:
+        parts = "; ".join(
+            f"{l['period']} {l['head']}: reversal gap {l['rev_gap']:,.2f}"
+            + (f", reclaim gap {l['rec_gap']:,.2f}" if l["rec_gap"] not in (None, 0) else "")
+            for l in bad[:8])
+        findings.append(Finding(
+            "CR1", "GSTR-3B 4(B)(2)/4(D)(1) do not match the Credit Reversal and Re-claimed Statement",
+            "FLAG", f"{len(bad)} period/head line(s) differ: {parts}"
+            + (" ..." if len(bad) > 8 else "") + ". Positive gap = the return shows more than the portal "
+            "statement records. Check the return as filed against the portal's own record.",
+            dict(mismatched_lines=len(bad))))
+    else:
+        findings.append(Finding(
+            "CR1", "GSTR-3B 4(B)(2)/4(D)(1) vs Credit Reversal and Re-claimed Statement", "PASS",
+            f"All compared periods agree head by head (IGST/CGST/SGST/Cess). "
+            + (f"{', '.join(outside)} lie outside the statement window and were not compared." if outside else ""),
+            dict(lines=len(rec["lines"]))))
+    if rec["arithmetic"]:
+        findings.append(Finding(
+            "CR2", "Credit Reversal Statement does not add up", "REVIEW",
+            "opening + reversal - reclaimed != closing: " + "; ".join(rec["arithmetic"][:5]), {}))
+    if gstin_bad:
+        findings.append(Finding(
+            "CR3", "Credit Reversal Statement is for a different GSTIN", "FLAG",
+            f"Statement GSTIN {st['gstin']} != taxpayer {ctx['self_gstin']}.", {}))
+    if unclaimed > 0:
+        findings.append(Finding(
+            "CR4", "ITC reversed under 4(B)(2) still not reclaimed", "INFO",
+            f"Statement closing balance (reversed under 4(B)(2), not yet reclaimed under 4(D)(1)): "
+            f"IGST {closing[0]:,.2f}, CGST {closing[1]:,.2f}, SGST {closing[2]:,.2f}, Cess {closing[3]:,.2f}. "
+            f"This credit is still reclaimable if the reason for the reversal has been cured (e.g. the "
+            f"supplier was paid within the s.16(2) 180-day limit); otherwise it stays lost.",
+            dict(unreclaimed_total=unclaimed)))
+    return dict(header=header, widths=widths, rows=rows, findings=findings, notes=notes)
+
+
 def build_itc_rollforward(ctx):
     """F2 + F3 -- ITC availed by head, reversed split 4B(1) vs 4B(2), net,
     ineligible, and the Electronic Credit Ledger's own credits/debits/balance.
@@ -1159,6 +1242,7 @@ def build_itc_rollforward(ctx):
 
     a1_by_m, a2_by_m, a3_by_m, a4_by_m, a5_by_m = {}, {}, {}, {}, {}
     avail_by_m, b1_by_m, b2_by_m, net_by_m, d1_by_m, d2_by_m = {}, {}, {}, {}, {}, {}
+    blocked_rev_by_m = {}
 
     running_opening = credit_opening
     # Absorb any ledger transaction that occurs BEFORE the first transaction tagged to this FY's
@@ -1185,17 +1269,27 @@ def build_itc_rollforward(ctx):
             v = (src or g3b).get(key)
             return sum(_n(x) for x in v[:4]) if isinstance(v, (list, tuple)) else 0.0
 
-        a1, a2, a3 = s("A1", ex), s("A2", ex), s("4A3")
-        a4, a5 = s("A4", ex), s("4A5")
+        # Prefer the lines the 3B parser/adapter now returns (work for every input layout); the raw
+        # re-read in `ex` is only the fallback for a parser result that lacks them.
+        a1 = s("4A1") if "4A1" in g3b else s("A1", ex)
+        a2 = s("4A2") if "4A2" in g3b else s("A2", ex)
+        a3 = s("4A3")
+        a4 = s("4A4") if "4A4" in g3b else s("A4", ex)
+        a5 = s("4A5")
         b1, b2 = s("4B1"), s("4B2")
         d1, d2 = s("D1", ex), s("D2", ex)
+        # What the taxpayer reversed for blocked credit: old form -> 4D(1) (17(5)); current form
+        # -> 17(5) reversals sit in 4B(1) (rules 38/42/43 + s.17(5)); 4D(1) there is a RECLAIM.
+        d1_is_175 = ex.get("D1_kind", "17(5)") == "17(5)"
+        blocked_reversed = d1 if d1_is_175 else b1
         avail = a1 + a2 + a3 + a4 + a5
         net = avail - b1 - b2
         led = cl_month.get(m, {})
 
         # ---- Stage 2, point 2: blocked-credit scan vs 4D(1) ----
         blocked_flagged = blocked_itc_by_month.get(m, 0.0)
-        blocked_gap = blocked_flagged - d1
+        blocked_gap = blocked_flagged - blocked_reversed
+        blocked_rev_by_m[m] = blocked_reversed
 
         # ---- Stage 2, point 3: credit-ledger running-balance tie-out ----
         credited_m, debited_m = _n(led.get("credited")), _n(led.get("debited"))
@@ -1216,6 +1310,7 @@ def build_itc_rollforward(ctx):
         T["cl_cr"] += credited_m
         T["cl_dr"] += debited_m
         T["blocked"] += blocked_flagged
+        T["blocked_rev"] = T.get("blocked_rev", 0.0) + blocked_reversed
         a1_by_m[m], a2_by_m[m], a3_by_m[m], a4_by_m[m], a5_by_m[m] = a1, a2, a3, a4, a5
         avail_by_m[m], b1_by_m[m], b2_by_m[m] = avail, b1, b2
         net_by_m[m], d1_by_m[m], d2_by_m[m] = net, d1, d2
@@ -1225,7 +1320,7 @@ def build_itc_rollforward(ctx):
                  T["b1"], T["b2"], T["b1"] + T["b2"], T["net"], T["d1"], T["d2"],
                  T["cl_cr"], T["cl_dr"], None,
                  (T["blocked"] if blocked_rows else None),
-                 ((T["blocked"] - T["d1"]) if blocked_rows else None),
+                 ((T["blocked"] - T.get("blocked_rev", 0.0)) if blocked_rows else None),
                  None, None, None])
 
     findings.append(Finding(
@@ -1235,7 +1330,11 @@ def build_itc_rollforward(ctx):
         f"ISD 4A(4) {_f(T['a4'])}. FY ITC reversed {_f(T['b1'] + T['b2'])} -- "
         f"{_f(T['b1'])} under 4B(1) (Rules 38/42/43 -- permanent reversal) and "
         f"{_f(T['b2'])} under 4B(2) (Others -- ordinarily temporary and reclaimable). "
-        f"Net ITC per Table 4C {_f(T['net'])}. Ineligible 4D(1) {_f(T['d1'])}, 4D(2) {_f(T['d2'])}.",
+        f"Net ITC per Table 4C {_f(T['net'])}. 4D(1) {_f(T['d1'])} (before Aug-2022: ineligible under 17(5); since then: reclaim of earlier 4B(2) reversals), 4D(2) {_f(T['d2'])}."
+        + (lambda mm: (f" NOTE: Table 4(D) could not be read for {', '.join(mm)} (the raw 3B sheet was not "
+                       f"found for that period -- e.g. quarterly or converted input), so 4D shows 0 there; "
+                       f"that is 'not read', not 'nil'.") if mm else "")(
+            [m for m in ctx["months"] if not ctx["g3b_extra_by_month"].get(m, {}).get("available")]),
         dict(availed=T["avail"], reversed_4b1=T["b1"], reversed_4b2=T["b2"], net=T["net"])))
 
     # 4B classification: the whole reversal sitting in 'Others' is worth a look
@@ -1308,10 +1407,10 @@ def build_itc_rollforward(ctx):
     BLOCKED_FLAG_COL = 18   # 'Blocked Scan minus 4D(1)' column (1-based)
     TIEOUT_COL = 21         # 'Credit Ledger Tie-Out Gap' column (1-based)
     if blocked_rows:
-        gap_fy = T["blocked"] - T["d1"]
+        gap_fy = T["blocked"] - T.get("blocked_rev", 0.0)
         flagged_months = []
         for idx, m in enumerate(ctx["months"]):
-            g = blocked_itc_by_month.get(m, 0.0) - d1_by_m.get(m, 0.0)
+            g = blocked_itc_by_month.get(m, 0.0) - blocked_rev_by_m.get(m, 0.0)
             if abs(g) > MATERIAL:
                 flagged_months.append((m, g))
                 highlight_cells[(idx, BLOCKED_FLAG_COL)] = RED
@@ -1320,8 +1419,8 @@ def build_itc_rollforward(ctx):
         findings.append(Finding(
             "F4", "Blocked Credit Scan (Trade-name match) vs 4D(1) reversed", "FLAG" if flagged_months else "INFO",
             f"FY ITC flagged by the 'Potential Blocked Credits' sheet (Trade-name keyword match) "
-            f"{_f(T['blocked'])}, against {_f(T['d1'])} actually reversed under Table 4D(1) "
-            f"(sec 17(5)) -- gap {_f(gap_fy)}. "
+            f"{_f(T['blocked'])}, against {_f(T.get('blocked_rev', 0.0))} actually reversed for blocked credit "
+            f"(Table 4D(1) in forms before Aug-2022; Table 4B(1) since, which also holds Rule 38/42/43 reversals) -- gap {_f(gap_fy)}. "
             + (f"{len(flagged_months)} month(s) individually exceed the materiality floor: "
                + "; ".join(f"{m} (gap {_f(g)})" for m, g in flagged_months) + ". "
                if flagged_months else "No individual month exceeds the materiality floor. ")
@@ -1331,7 +1430,7 @@ def build_itc_rollforward(ctx):
               "supplier whose trade name doesn't match any keyword). The keyword scan itself is "
               "Trade-name-only (see that sheet's own notes for why) -- treat this as a screening "
               "cross-check, not a computed liability.",
-            dict(blocked_flagged_fy=T["blocked"], reversed_4d1_fy=T["d1"], gap_fy=gap_fy)))
+            dict(blocked_flagged_fy=T["blocked"], reversed_for_blocked_fy=T.get("blocked_rev", 0.0), gap_fy=gap_fy)))
     else:
         findings.append(Finding("F4", "Blocked Credit Scan (Trade-name match) vs 4D(1) reversed",
                                 "SKIPPED", "No blocked-credit master file was supplied/detected this "
@@ -1382,7 +1481,7 @@ def build_itc_rollforward(ctx):
     _cols = [("4A(1) import goods", a1_by_m), ("4A(2) import svc", a2_by_m), ("4A(3) RCM", a3_by_m),
              ("4A(4) ISD", a4_by_m), ("4A(5) all other ITC", a5_by_m), ("4A TOTAL availed", avail_by_m),
              ("4B(1) Rules 38/42/43", b1_by_m), ("4B(2) Others", b2_by_m), ("4C net ITC", net_by_m),
-             ("4D(1) sec 17(5)", d1_by_m), ("4D(2) other ineligible", d2_by_m)]
+             ("4D(1) (17(5) pre-Aug-22 / reclaim of 4B(2) after)", d1_by_m), ("4D(2) other ineligible", d2_by_m)]
     outlier_lines = []
     for col_name, by_m in _cols:
         hits = _mom_outlier_check(by_m, ctx["months"], cfg.ITC_ROLLFORWARD_MOM_THRESHOLD,
@@ -1413,9 +1512,9 @@ def build_itc_rollforward(ctx):
     return dict(header=["Month", "4A(1) import goods", "4A(2) import svc", "4A(3) RCM",
                         "4A(4) ISD", "4A(5) all other ITC", "4A TOTAL availed",
                         "4B(1) Rules 38/42/43", "4B(2) Others", "4B TOTAL reversed",
-                        "4C net ITC", "4D(1) sec 17(5)", "4D(2) other ineligible",
+                        "4C net ITC", "4D(1) (17(5) pre-Aug-22 / reclaim of 4B(2) after)", "4D(2) other ineligible",
                         "Credit ledger credited", "Credit ledger debited", "Note",
-                        "Blocked Scan Flagged ITC", "Blocked Scan minus 4D(1)",
+                        "Blocked Scan Flagged ITC", "Blocked Scan minus reversed (4D(1) old form / 4B(1) current)",
                         "Credit Ledger Computed Closing", "Credit Ledger Actual Closing",
                         "Credit Ledger Tie-Out Gap"],
                 widths=[10] + [18] * 14 + [40] + [20, 20, 22, 20, 18],
@@ -1825,12 +1924,16 @@ def build_drc_and_ledger_movements(ctx):
             desc = str(t.get("description", ""))
             ref = str(t.get("ref", ""))
             low = desc.lower()
-            is_vol = any(k in low for k in VOL)
+            # "Payment of Demand under Appeal" is the statutory pre-deposit (s.107(6)) against a
+            # confirmed demand -- it contains the word "demand" but is not a voluntary/DRC-03 payment.
+            is_appeal = "appeal" in low
+            is_vol = (not is_appeal) and any(k in low for k in VOL)
             is_other = ("refund" in low or "block" in low)
-            if not (is_vol or is_other):
+            if not (is_vol or is_other or is_appeal):
                 continue
-            kind = "DRC-03 / voluntary" if is_vol else (
-                "Refund debit" if "refund" in low else "Rule 86A block")
+            kind = ("Appeal pre-deposit (demand under appeal)" if is_appeal else
+                    "DRC-03 / voluntary" if is_vol else (
+                        "Refund debit" if "refund" in low else "Rule 86A block"))
             n_drc += 1 if is_vol else 0
             rows.append([src, t.get("date"), ref, t.get("tax_period") or "-", desc,
                          t.get("ttype"), _n(t.get(amt_key)), kind])
@@ -3610,6 +3713,9 @@ SHEETS = [
      "F2 and F3 -- ITC availed by head, reversal split between Table 4B(1) (Rules 38/42/43, "
      "permanent) and 4B(2) (Others, ordinarily temporary), net credit, ineligible credit, and the "
      "Electronic Credit Ledger's own credits and debits."),
+    ("Credit Reversal Recon", build_credit_reversal_recon,
+     "CR1 -- GSTR-3B Table 4(B)(2) reversals and 4(D)(1) reclaims against the portal's Electronic "
+     "Credit Reversal and Re-claimed Statement, by tax period and head."),
     ("3-Way GSTR1 3B EWB", build_three_way,
      "F4 and F5 -- outward value as invoiced (GSTR-1), as declared (GSTR-3B 3.1(a)), and as moved "
      "(e-way bills, deduplicated on EWB number)."),

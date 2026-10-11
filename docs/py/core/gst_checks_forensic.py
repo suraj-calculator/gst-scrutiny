@@ -153,13 +153,25 @@ def check_four_way_itc(gstr9, gstr2b_fy_total, table8a, gstr9c, annual_turnover=
     sources = {}
     if gstr9.get("available") and gstr9.get("table6a_total") is not None:
         sources["3B (GSTR-9 Table 6A)"] = gstr9["table6a_total"]
+    # GSTR-9 6O - 7I (= 7J, "Net ITC available for utilisation"). Verified on the filed return: the 9C
+    # form's own "ITC claimed in Annual Return (GSTR9)" (12E) equals this net figure, not 6A/6O gross,
+    # so books (12D) are net of reversals while 6A is gross. Shown as a separate source, never in place of 6A.
+    _t6o, _t7 = gstr9.get("table6_total_itc_availed"), gstr9.get("table7_total_reversed")
+    net_9 = (_t6o - (_t7 or 0.0)) if (gstr9.get("available") and _t6o is not None) else None
+    if net_9 is not None:
+        sources["3B net of reversals (GSTR-9 6O - 7I)"] = net_9
     if gstr2b_fy_total:
         t = sum(v or 0 for k, v in gstr2b_fy_total.items() if k != "_source")
         sources["2B (recomputed FY total)"] = t
     if table8a.get("available") and table8a.get("totals"):
         sources["8A (invoice-level, ITC-available=Yes)"] = table8a["totals"].get("total")
     if gstr9c.get("available") and gstr9c.get("itc_per_books") is not None:
-        sources["Books (GSTR-9C Table 12A)"] = gstr9c["itc_per_books"]
+        # 12D = 12A + 12B - 12C: ITC booked in the year, plus earlier-year ITC claimed now, minus
+        # ITC booked now but claimed later. Comparing the raw 12A against the returns showed the
+        # timing difference (12B/12C) as a "books vs returns gap".
+        sources["Books (GSTR-9C Table 12A)"] = (gstr9c["itc_per_books"]
+                                                 + (gstr9c.get("itc_booked_earlier_claimed_now") or 0.0)
+                                                 - (gstr9c.get("itc_booked_now_claimed_later") or 0.0))
 
     if len(sources) < 2:
         return Finding("R14", "Four-way ITC reconciliation (3B / 2B / 8A / Books)", INFO,
@@ -185,6 +197,15 @@ def check_four_way_itc(gstr9, gstr2b_fy_total, table8a, gstr9c, annual_turnover=
 
     if books is not None and return_side:
         gaps = {k: (v - books) for k, v in return_side.items()}
+        # A gross-vs-books gap that equals the GSTR-9 Table 7 reversals to the rupee is the reversals,
+        # not an unexplained difference: books are net, 6A is gross.
+        gross_key = "3B (GSTR-9 Table 6A)"
+        if (net_9 is not None and gross_key in gaps and _t7
+                and abs(gaps[gross_key] - _t7) <= TOL_RS and abs(net_9 - books) <= TOL_RS):
+            detail += (f"The 3B gross-vs-books gap of Rs {gaps[gross_key]:,.2f} equals GSTR-9 Table 7 "
+                       f"reversals (Rs {_t7:,.2f}) exactly, and 6O - 7I equals the books figure: it is the "
+                       f"reversals, not an unexplained difference. ")
+            gaps[gross_key] = 0.0
         gap_lines = "; ".join(f"{k} - Books = Rs {g:,.2f}" for k, g in gaps.items())
         detail += f"Books-vs-return gaps: {gap_lines}. "
         material_gap = any(abs(g) > materiality for g in gaps.values())

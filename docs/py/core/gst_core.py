@@ -1181,9 +1181,16 @@ def classify_folder(folder="."):
     # Distinguished by the report's own title cell (real file content, not a filename
     # guess) -- verified against a real pair of these files for the same GSTIN/FY.
     cash_ledgers, credit_ledgers, liab_register_files, liab_demand_files = [], [], [], []
+    credit_reversal_files = []
     for c in csvs:
         line = _csv_first_line(c).lower()
-        if "cash ledger" in line:
+        if "credit reversal" in line or "re-claimed" in line:
+            # "Electronic Credit Reversal and Re-claimed Statement" (4B(2) reversals / 4D(1) reclaims).
+            # Reconciled against 3B 4(B)(2)/4(D)(1) by gst_checks_flow.build_credit_reversal_recon.
+            credit_reversal_files.append(c)
+            print(f"[info] {os.path.basename(c)}: recognised as the Electronic Credit Reversal and "
+                  f"Re-claimed Statement -- reconciled against 3B 4(B)(2)/4(D)(1).")
+        elif "cash ledger" in line:
             cash_ledgers.append(c)
         elif "credit ledger" in line:
             credit_ledgers.append(c)
@@ -1266,6 +1273,7 @@ def classify_folder(folder="."):
         # Annual-level sources -- now lists (one set per FY)
         cash_ledgers=cash_ledgers, credit_ledgers=credit_ledgers,
         liab_register_files=liab_register_files, liab_demand_files=liab_demand_files,
+        credit_reversal_files=credit_reversal_files,
         cash_ledger=cash_ledgers[0] if cash_ledgers else None,
         credit_ledger=credit_ledgers[0] if credit_ledgers else None,
         # BACKWARD-COMPAT: liab_ledger/liab_ledgers keep pointing at the RETURN register

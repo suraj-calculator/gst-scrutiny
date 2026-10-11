@@ -139,8 +139,8 @@ def main():
                 ok &= check("[new form] fraud-check fields identical except rule42_43 (intended fix)",
                             all(v for k, v in same.items() if k != "itc_reversed_rule42_43") and
                             not same["itc_reversed_rule42_43"], str(same))
-                ok &= check("[new form] rule42_43 now reads the real 4B(1) figure (12 x 2 = 24), legacy read 0",
-                            new_f["itc_reversed_rule42_43"] == 24.0 and old_f["itc_reversed_rule42_43"] == 0.0)
+                ok &= check("[new form] rule42_43 now reads the real 4B(1) figure, all heads summed ((12+13+14) x 2 = 78), legacy read 0",
+                            new_f["itc_reversed_rule42_43"] == 78.0 and old_f["itc_reversed_rule42_43"] == 0.0)
         raw = os.path.join(tmp, "3b_new.xlsx")
 
         # ---- canonical workbook
@@ -154,7 +154,7 @@ def main():
                     all(r["gstin"] == GSTIN and r["arn"] for r in d["returns"]))
         ok &= check("LINES names every recognised line for a month",
                     {ln["code"] for ln in d["lines"] if ln["month"] == "May-24"} ==
-                    {"3.1a", "3.1b", "3.1c", "3.1d", "3.1e", "4A3", "4A4", "4A5", "4B1", "4B2", "4C"})
+                    {"3.1a", "3.1b", "3.1c", "3.1d", "3.1e", "4A1", "4A2", "4A3", "4A4", "4A5", "4B1", "4B2", "4C"})
         ln = [x for x in d["lines"] if x["month"] == "May-24" and x["code"] == "3.1a"][0]
         ok &= check("LINES columns follow the form headings (taxable / igst / cgst / sgst / cess)",
                     (ln["taxable"], ln["igst"], ln["cgst"], ln["sgst"], ln["cess"]) == (2000.0, 20.0, 180.0, 180.0, 10.0))

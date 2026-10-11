@@ -499,6 +499,7 @@ def parse_gstr1(path, month):
             rows = _rows_for_month(ix, B2B, month)
             has_irn = ix["ok"].get((B2B, "irn"), False)
             last_gstin, last_invno = None, None
+            irn_seen, no_irn_primary = False, 0
             for r in rows:
                 if not r["_any"]:
                     continue
@@ -508,10 +509,13 @@ def parse_gstr1(path, month):
                 out["CGST"] += cg
                 out["SGST"] += sg
                 out["CESS"] += ce
-                if not has_irn or not str(r["irn"]).strip():
-                    out["b2b_no_irn"] += 1
+                irn_v = r["irn"] if has_irn else None
+                has_irn_v = irn_v is not None and str(irn_v).strip() not in ("", "None")   # str(None) is truthy
+                irn_seen = irn_seen or has_irn_v
                 raw_gstin, raw_invno = r["gstin"], r["invno"]
                 if raw_gstin not in (None, "") and raw_invno not in (None, ""):
+                    if not has_irn_v:
+                        no_irn_primary += 1
                     last_gstin = str(raw_gstin).strip()
                     last_invno = str(raw_invno).strip()
                     gstin_key, invno = last_gstin, last_invno
@@ -532,6 +536,10 @@ def parse_gstr1(path, month):
                     out["named_IGST"] += ig
                     out["named_CGST"] += cg
                     out["named_SGST"] += sg
+        # Counted per invoice (primary rows, not rate-lines). If NO row of the month carries an IRN the portal
+            # export simply does not include the column, so "no IRN" cannot be assessed: report 0, flag it.
+            out["b2b_no_irn"] = no_irn_primary if irn_seen else 0
+            out["irn_column_blank"] = not irn_seen
         except mpu.PeriodParseError:
             out["month_marker_gaps"].append(B2B)
     for sn in (B2CL, EXP):
@@ -566,14 +574,24 @@ def parse_gstr1(path, month):
     for sn in (CDNR, CDNUR):
         if sn in tabs:
             try:
+                # cn_* is the NET REDUCTION of outward supply: a credit note (C) reduces it, a debit
+                # note (D) raises it, so it enters with the opposite sign. (Every consumer does
+                # "invoices - cn_*"; treating a debit note as a credit note double-counted it.)
+                # A multi-rate note leaves Note Type blank on its continuation rows, so the last
+                # seen type is carried forward; unknown type is treated as a credit note (as before).
+                last_nt = "C"
                 for r in _rows_for_month(ix, sn, month):
                     if not r["_any"]:
                         continue
-                    out["cn_taxable"] += _f(r["taxable"])
-                    out["cn_IGST"] += _f(r["igst"])
-                    out["cn_CGST"] += _f(r["cgst"])
-                    out["cn_SGST"] += _f(r["sgst"])
-                    out["cn_CESS"] += _f(r["cess"])
+                    nt = str(r.get("notetype") or "").strip().upper()
+                    if nt:
+                        last_nt = nt
+                    sg = -1.0 if last_nt[:1] == "D" else 1.0
+                    out["cn_taxable"] += sg * _f(r["taxable"])
+                    out["cn_IGST"] += sg * _f(r["igst"])
+                    out["cn_CGST"] += sg * _f(r["cgst"])
+                    out["cn_SGST"] += sg * _f(r["sgst"])
+                    out["cn_CESS"] += sg * _f(r["cess"])
             except mpu.PeriodParseError:
                 out["month_marker_gaps"].append(sn)
     hsn_all = read_gstr1_hsn_all_months(path)
