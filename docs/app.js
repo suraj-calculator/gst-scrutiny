@@ -1073,8 +1073,8 @@ document.getElementById("run-btn").addEventListener("click", async function () {
     const hs = lg.match(/HSN & Fraud Pattern Checks: (\d+) total \((\d+) FLAG, (\d+) REVIEW\)/);
     sendGstResultReport({
       taxpayerName: result.taxpayer_name,
-      gstin: gstinField.value.trim(),
-      fy: fyField.value.trim(),
+      gstin: gstinField.value.trim() || result.gstin || "",
+      fy: fyField.value.trim() || result.fy || "",
       reportBytes: result.output_bytes,
       reportName: result.output_name,
       durationSecs: (performance.now() - runT0) / 1000,
