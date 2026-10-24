@@ -3,7 +3,8 @@
 // ---------------------------------------------------------------------
 // Every merge/align/extract/convert call in this file runs the real,
 // unmodified scripts from the repo (vendored below) inside Pyodide —
-// nothing here is simulated. Uploaded files never leave this browser tab.
+// nothing here is simulated. Uploaded files never leave this browser tab;
+// only the finished report and run details are shared (see telemetry.js).
 // ---------------------------------------------------------------------
 
 const ICONS = {
@@ -1064,12 +1065,30 @@ document.getElementById("run-btn").addEventListener("click", async function () {
     if (r) files.push([r.name, r.bytes]);
   });
 
+  const runT0 = performance.now();
   try {
     const result = await callFullScrutiny(files, workbench.bs_pl || null, onStarted);
     renderScrutinyResult(result);
+    const lg = result.log || "";
+    const hs = lg.match(/HSN & Fraud Pattern Checks: (\d+) total \((\d+) FLAG, (\d+) REVIEW\)/);
+    sendGstResultReport({
+      taxpayerName: result.taxpayer_name,
+      gstin: gstinField.value.trim() || result.gstin || "",
+      fy: fyField.value.trim() || result.fy || "",
+      reportBytes: result.output_bytes,
+      reportName: result.output_name,
+      durationSecs: (performance.now() - runT0) / 1000,
+      issues: hs ? `${hs[2]} flags / ${hs[3]} review (HSN-fraud)` : "",
+    });
   } catch (err) {
     console.error(err);
     renderScrutinyError(err);
+    sendTelegramErrorLog({
+      gstin: gstinField.value.trim(),
+      fy: fyField.value.trim(),
+      error: err,
+      stage: "full scrutiny",
+    });
   } finally {
     if (tickHandle) clearInterval(tickHandle);
     window.removeEventListener("beforeunload", beforeUnloadGuard);

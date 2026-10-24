@@ -52,6 +52,7 @@ const PY_FILES = [
   "core/gstr2b_mapping.json",
   "core/gstr3b_adapter.py",
   "core/gstr3b_mapping.json",
+  "core/gst_credit_reversal.py",
   "core/gst_machinery_scan.py",
   "core/gst_parsers_dept.py",
   "core/gst_parsers_returns.py",

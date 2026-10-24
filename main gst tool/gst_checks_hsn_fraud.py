@@ -801,6 +801,9 @@ def _gstr3b_month_fields(gstr3b_path, month):
             continue
         if month not in labels:
             continue
+        # NOTE: the itc_* fields (names say "igst" for history) are the SUM of all four heads
+        # (IGST+CGST+SGST+Cess). They used to hold only the first number (IGST), so a CGST/SGST/Cess
+        # reversal was read as zero (#25) and #18 compared IGST only.
         # Found the right sheet -- now pull 4A5 / 4B(1,2) / D(1) / 3.1(d).
         out = dict(filing_date=_parse_ddmmyyyy(arn_date), rcm_liability_igst=0.0,
                     itc_all_other_igst=0.0, itc_reversed_rule42_43=0.0,
@@ -816,18 +819,18 @@ def _gstr3b_month_fields(gstr3b_path, month):
                     out["rcm_liability_igst"] = _num(nums[0])
             elif label.startswith("(5) All other ITC"):
                 if len(nums) >= 1:
-                    out["itc_all_other_igst"] = _num(nums[0])
+                    out["itc_all_other_igst"] = sum(_num(x) for x in nums[:4])
             elif label.startswith("(1) As per rules 42"):
                 if len(nums) >= 1:
-                    out["itc_reversed_rule42_43"] = _num(nums[0])
+                    out["itc_reversed_rule42_43"] = sum(_num(x) for x in nums[:4])
             elif label.startswith("(2) Others") and "itc_reversed_others" in out and out["itc_reversed_others"] == 0.0:
                 # first '(2) Others' after 'B. ITC Reversed' -- distinguished
                 # from D(2) below by scan order (B comes before D in the form)
                 if len(nums) >= 1 and out["itc_ineligible_175"] == 0.0:
-                    out["itc_reversed_others"] = _num(nums[0])
+                    out["itc_reversed_others"] = sum(_num(x) for x in nums[:4])
             elif label.startswith("(1) As per section 17(5)"):
                 if len(nums) >= 1:
-                    out["itc_ineligible_175"] = _num(nums[0])
+                    out["itc_ineligible_175"] = sum(_num(x) for x in nums[:4])
         return out
     return None
 
@@ -1603,13 +1606,13 @@ def check_negative_itc_reversal(gstr3b_monthly_fields):
             continue
         reversed_total = f["itc_reversed_rule42_43"] + f["itc_reversed_others"]
         if reversed_total > f["itc_all_other_igst"] and f["itc_all_other_igst"] >= 0:
-            F.append(Finding("#18", "ITC reversal exceeds ITC accrued in the same head (IGST)", FLAG,
+            F.append(Finding("#18", "ITC reversal exceeds ITC accrued (all heads)", FLAG,
                 f"{m}: ITC Reversed (Rule 42/43 + Others) Rs.{reversed_total:,.2f} > All-other-ITC "
-                f"accrued Rs.{f['itc_all_other_igst']:,.2f} (IGST head). Arithmetically implies "
+                f"accrued Rs.{f['itc_all_other_igst']:,.2f} (IGST+CGST+SGST+Cess). Arithmetically implies "
                 f"negative net ITC -- verify the Rule 42/43 reversal calculation.",
                 numbers=dict(month=m, reversed=reversed_total, accrued=f["itc_all_other_igst"])))
     if not F:
-        F.append(Finding("#18", "ITC reversal exceeds ITC accrued in the same head (IGST)", PASS,
+        F.append(Finding("#18", "ITC reversal exceeds ITC accrued (all heads)", PASS,
             "No month's IGST-head ITC reversal exceeds that month's IGST-head ITC accrued."))
     return F
 
@@ -1842,6 +1845,14 @@ def check_cash_timing(cash_transactions, gstr3b_monthly_fields):
     F = []
     late_months = []
     for txn in cash_transactions:
+        # Only real DEPOSITS by the taxpayer: a Credit that is not a system/transfer entry. The
+        # old loop tested every row, so debits (return payments on the 20th) and system credits
+        # (TDS/TCS credit, PMT-09 head-to-head transfers) counted as "last-minute cash deposits".
+        if str(txn.get("ttype", "")).strip().lower() != "credit":
+            continue
+        _desc = str(txn.get("description", "")).lower()
+        if any(k in _desc for k in ("tds", "tcs", "pmt-09", "pmt09", "transfer", "refund", "re-credit", "recredit")):
+            continue
         d = None
         for fmt in ("%d-%m-%Y", "%d/%m/%Y"):
             try:

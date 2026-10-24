@@ -16,6 +16,7 @@ browser (see app.js). Nothing here is Pyodide-specific.
 import glob
 import importlib
 import os
+import re
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -417,14 +418,39 @@ def process_full_scrutiny(files, bs_pl_data, work_dir):
     prev_cwd = os.getcwd()
     os.chdir(work_dir)
     log_buf = io.StringIO()
+    # Observe (never alter) the BO Profile master_build parses, purely to read
+    # the taxpayer's legal/trade name for the team-notification message.
+    _bo_seen = {}
+    _orig_safe_parse_bo = master_build._safe_parse_bo
+    def _spy_safe_parse_bo(path):
+        r = _orig_safe_parse_bo(path)
+        _bo_seen["bo"] = r
+        return r
+    master_build._safe_parse_bo = _spy_safe_parse_bo
+    # Likewise observe the folder classification (GSTIN / company name found in the uploaded returns).
+    _res_seen = {}
+    _orig_classify = master_build.classify_folder
+    def _spy_classify(folder):
+        r = _orig_classify(folder)
+        _res_seen["res"] = r
+        return r
+    master_build.classify_folder = _spy_classify
     try:
         with contextlib.redirect_stdout(log_buf):
             outfile = master_build.main(".")
+        _bo = _bo_seen.get("bo") or {}
         result = {
             "output_name": outfile,
             "output_bytes": _read_bytes(outfile),
             "log": log_buf.getvalue(),
+            "taxpayer_name": (_bo.get("legal_name") or _bo.get("trade_name")
+                              or (_res_seen.get("res") or {}).get("company_name") or None),
         }
+        # GSTIN and FY: the output name is GST_MASTER_<GSTIN>_FY<yyyy-yy>.xlsx, so it always carries both
+        # (the page's own GSTIN/FY fields may be blank).
+        _m = re.match(r"GST_MASTER_([0-9A-Z]{15})_FY([0-9]{4}-[0-9]{2,4})", os.path.basename(outfile or ""))
+        result["gstin"] = _m.group(1) if _m else ((_res_seen.get("res") or {}).get("self_gstin") or None)
+        result["fy"] = _m.group(2) if _m else None
         # Canonical layers (docs/GSTR2B_CANONICAL_SPEC.md, docs/GSTR3B_CANONICAL_SPEC.md): hand back every
         # converted file and the warnings/errors found while converting, so the page can show and offer them.
         cdir = os.path.join(work_dir, "_canonical")
@@ -477,6 +503,7 @@ def process_full_scrutiny(files, bs_pl_data, work_dir):
                     pass
         return result
     finally:
+        master_build._safe_parse_bo = _orig_safe_parse_bo
         os.chdir(prev_cwd)
 
 
