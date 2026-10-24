@@ -217,6 +217,7 @@ import gst_checks_forensic as fchk
 import gst_checks_flow as flow
 import gst_core as mpu
 import gst_blocked_credit as bcred
+import gst_source_trace as strace
 import gst_machinery_scan as mscan
 
 RED = PatternFill("solid", fgColor="FFC7CE")
@@ -2970,6 +2971,13 @@ def main(folder="."):
     base_names = [s for s in wb.sheetnames if s not in desired_tail]
     sheets_by_name = {s.title: s for s in wb._sheets}
     wb._sheets = [sheets_by_name[n] for n in base_names + desired_tail]
+
+    # Traceability pass (appends a 'Source & Formula' column to every sheet + a 'Source Map'
+    # sheet; never changes an existing cell, never allowed to fail the run).
+    try:
+        print(f"  {strace.add_source_trace(wb)}")
+    except Exception as ex:
+        print(f"  Source trace SKIPPED: {ex!r}")
 
     fy_tag = (fys_covered[0] if len(fys_covered) == 1 else
               f"{fys_covered[0]}_to_{fys_covered[-1]}" if fys_covered else "UNKNOWN_FY")
