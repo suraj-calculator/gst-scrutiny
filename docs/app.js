@@ -1123,6 +1123,7 @@ let cvBusy = false;
 
 function enableConvertDropzone() {
   cvDrop.dataset.disabled = "false";
+  document.getElementById("cv-title").textContent = "Drop PDFs here or click to choose";
   cvHint.textContent = "GSTR-9, GSTR-9C or BO Profile PDFs \u2014 several at once is fine";
 }
 
@@ -1132,23 +1133,40 @@ async function convertPdfFiles(fileList) {
   if (cvBusy) { toast("A conversion is already running."); return; }
   cvBusy = true;
   cvDrop.dataset.disabled = "true";
-  cvResults.innerHTML = `<div class="result-line"><span>Converting ${pdfs.length} PDF${pdfs.length > 1 ? "s" : ""}\u2026 the first run also installs the PDF reader, which can take a little while.</span></div>`;
+  document.getElementById("cv-title").textContent = "Converting\u2026";
+  cvHint.textContent = "Please wait until the current conversion finishes.";
+  const t0 = Date.now();
+  cvResults.innerHTML = `<div class="cv-loading"><div class="boot-spinner"></div>
+    <div class="cv-loading-text"><strong>Converting ${pdfs.length} PDF${pdfs.length > 1 ? "s" : ""}\u2026</strong>
+    <span>The first conversion also sets up the PDF reader, so it takes a little longer.</span></div>
+    <div class="cv-loading-time" id="cv-timer">0s</div></div>`;
+  const cvTimer = setInterval(() => {
+    const el = document.getElementById("cv-timer");
+    if (el) el.textContent = `${Math.round((Date.now() - t0) / 1000)}s`;
+  }, 1000);
   try {
     const filePairs = [];
     for (const f of pdfs) filePairs.push([f.name, new Uint8Array(await f.arrayBuffer())]);
     const res = await callPdfToExcel(filePairs);
+    const ICON_FILE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h8l4 4v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M15 3v4h4"/><path d="M9 13h6M9 17h6"/></svg>';
+    const ICON_DL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12M7 11l5 5 5-5"/><path d="M5 20h14"/></svg>';
     const rows = res.results.map((r, i) => r.ok
-      ? `<div class="result-line"><span><strong>${escapeHtml(r.name)}</strong> \u2192 ${escapeHtml(CV_DOC_LABELS[r.doc_type] || r.doc_type)}, ${r.sheets} sheets</span>
-           <button class="btn small" data-cv="${i}" type="button">Download ${escapeHtml(r.output_name)}</button></div>`
-      : `<div class="result-line warn"><span><strong>${escapeHtml(r.name)}</strong> could not be converted: ${escapeHtml(String(r.error).split("\n")[0])}</span></div>`);
+      ? `<div class="cv-row"><span class="cv-ico">${ICON_FILE}</span>
+           <div class="cv-info"><div class="cv-name" title="${escapeHtml(r.name)}">${escapeHtml(r.name)}</div>
+           <div class="cv-meta">${escapeHtml(CV_DOC_LABELS[r.doc_type] || r.doc_type)} \u00b7 ${r.sheets} sheets</div></div>
+           <button class="cv-dl" data-cv="${i}" type="button">${ICON_DL}Download Excel</button></div>`
+      : `<div class="cv-row fail"><span class="cv-ico">${ICON_FILE}</span>
+           <div class="cv-info"><div class="cv-name" title="${escapeHtml(r.name)}">${escapeHtml(r.name)}</div>
+           <div class="cv-meta">Could not be converted: ${escapeHtml(String(r.error).split("\n")[0])}</div></div></div>`);
     cvResults.innerHTML = rows.join("");
     cvResults.querySelectorAll("button[data-cv]").forEach(btn => {
       const r = res.results[Number(btn.dataset.cv)];
       btn.addEventListener("click", () => downloadBytes(r.output_bytes, r.output_name));
     });
   } catch (err) {
-    cvResults.innerHTML = `<div class="result-line warn"><span>Conversion failed: ${escapeHtml(String(err.message || err).split("\n")[0])}</span></div>`;
+    cvResults.innerHTML = `<div class="cv-row fail"><div class="cv-info"><div class="cv-name">Conversion failed</div><div class="cv-meta">${escapeHtml(String(err.message || err).split("\n")[0])}</div></div></div>`;
   } finally {
+    clearInterval(cvTimer);
     cvBusy = false;
     enableConvertDropzone();
     cvInput.value = "";

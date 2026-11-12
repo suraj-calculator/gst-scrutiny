@@ -385,6 +385,31 @@
   .btn-login { background: var(--accent); color: #fff; border: 1px solid var(--accent-ink); font-size: 13.5px; font-weight: 700; padding: 11px 16px; border-radius: var(--radius-sm); cursor: pointer; width: 100%; }
   .btn-login:hover { background: var(--accent-ink); }
 
+  /* ---------- convert PDF to Excel view ---------- */
+  #cv-drop .dz-spin { display: none; width: 22px; height: 22px; border-width: 2.5px; flex: none; }
+  #cv-drop[data-disabled="true"] .dz-spin { display: block; }
+  #cv-drop[data-disabled="true"] .dz-icon { display: none; }
+  #cv-drop[data-disabled="true"] { background: var(--surface); }
+  .cv-list { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; }
+  .cv-loading { display: flex; align-items: center; gap: 14px; padding: 16px 18px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); box-shadow: var(--shadow-card); }
+  .cv-loading .boot-spinner { width: 26px; height: 26px; flex: none; margin: 0; }
+  .cv-loading-text strong { display: block; font-size: 13px; font-weight: 600; color: var(--ink); }
+  .cv-loading-text span { display: block; font-size: 12px; color: var(--ink-faint); margin-top: 2px; }
+  .cv-loading-time { margin-left: auto; font-family: 'IBM Plex Mono', monospace; font-size: 13px; font-weight: 600; color: var(--accent-ink); }
+  .cv-row { display: flex; align-items: center; gap: 14px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); box-shadow: var(--shadow-card); }
+  .cv-row.fail { background: var(--flag-bg); border-color: var(--flag-border); }
+  .cv-ico { width: 34px; height: 34px; border-radius: 8px; background: var(--accent-tint); color: var(--accent-ink); display: flex; align-items: center; justify-content: center; flex: none; }
+  .cv-row.fail .cv-ico { background: var(--surface); color: var(--flag-fg); }
+  .cv-ico svg { width: 17px; height: 17px; }
+  .cv-info { min-width: 0; flex: 1; }
+  .cv-name { font-size: 13px; font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cv-meta { font-size: 12px; color: var(--ink-faint); margin-top: 2px; }
+  .cv-row.fail .cv-meta { color: var(--flag-fg); white-space: normal; }
+  .cv-dl { display: inline-flex; align-items: center; gap: 7px; flex: none; font-size: 12.5px; font-weight: 600; padding: 8px 14px; border-radius: var(--radius-sm); border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; transition: background-color .15s ease; }
+  .cv-dl:hover { background: var(--accent-ink); }
+  .cv-dl svg { width: 14px; height: 14px; }
+  @media (max-width: 560px) { .cv-row { flex-wrap: wrap; } .cv-dl { width: 100%; justify-content: center; } }
+
   /* ---------- app shell / sidebar ---------- */
   .app-shell { display: flex; min-height: 100vh; }
   .app-shell[hidden] { display: none; }
@@ -528,10 +553,11 @@
           Runs entirely in this browser tab &mdash; nothing is uploaded to a server.</p>
         <div class="dropzone" id="cv-drop" data-disabled="true">
           <span class="dz-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg></span>
-          <span class="dz-text"><strong>Drop PDFs here or click to choose</strong><span id="cv-hint">Waiting for the Python runtime to load&hellip;</span></span>
+          <span class="dz-spin boot-spinner"></span>
+          <span class="dz-text"><strong id="cv-title">Starting the conversion engine&hellip;</strong><span id="cv-hint">Loading the Python runtime &mdash; usually under 10 seconds, once per visit.</span></span>
           <input type="file" id="cv-input" accept=".pdf,application/pdf" multiple hidden>
         </div>
-        <div id="cv-results" style="margin-top:16px"></div>
+        <div id="cv-results" class="cv-list"></div>
       </div>
     </section>
 
