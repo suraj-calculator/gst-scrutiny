@@ -21,6 +21,8 @@ const PY_FILES = [
   "merge/e invoice/gst_merge_common.py", "merge/e invoice/merge_einv.py",
   "extract_align/extractor/run.py",
   "extract_align/alligner/complete_workbooks.py",
+  "pdf/pdf_to_excel_core.py", "pdf/parse_gstr9.py", "pdf/parse_gstr9c.py",
+  "pdf/parse_bo_profile.py", "pdf/parse_ewb_analytics.py", "pdf/gst_pdf_to_excel.py",
   "core/bs_pl_input.py",
   "core/gst_blocked_credit.py",
   "core/gst_checks_flow.py",
@@ -186,6 +188,21 @@ result
 `, { _files: filePairs, _bs_pl: bsPlData || null, _work_dir: `/work/full_${++_callSeq}` });
 }
 
+let _pdfplumberReady = false;
+async function callPdfToExcel(filePairs) {
+  // pdfplumber (+ pypdfium2) is only needed here, so install it on first use
+  // instead of slowing down every page load.
+  if (!_pdfplumberReady) {
+    await pyodide.pyimport("micropip").install("pdfplumber");
+    _pdfplumberReady = true;
+  }
+  return await runPy(`
+files = [(n, bytes(d)) for n, d in _files]
+result = web_adapters.process_pdf_to_excel(files, _work_dir)
+result
+`, { _files: filePairs, _work_dir: `/work/pdf2x_${++_callSeq}` });
+}
+
 async function callPdfExport(xlsxBytes) {
   return await runPy(`
 result = web_adapters.process_pdf_export(bytes(_xlsx), _work_dir)
@@ -227,6 +244,7 @@ async function handleCall(msg) {
     else if (msg.adapter === "gstr2b") result = await callGstr2b(msg.args.filePairs);
     else if (msg.adapter === "gstr3b") result = await callGstr3b(msg.args.filePairs);
     else if (msg.adapter === "full_scrutiny") result = await callFullScrutiny(msg.args.filePairs, msg.args.bsPlData);
+    else if (msg.adapter === "pdf_to_excel") result = await callPdfToExcel(msg.args.filePairs);
     else if (msg.adapter === "pdf_export") result = await callPdfExport(msg.args.xlsxBytes);
     else throw new Error(`unknown adapter: ${msg.adapter}`);
     post({ type: "result", id: msg.id, ok: true, result });

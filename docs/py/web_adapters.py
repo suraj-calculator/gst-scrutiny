@@ -32,6 +32,10 @@ for _sub in ("ewb", "core"):
     _p = os.path.join(_HERE, _sub)
     if _p not in sys.path:
         sys.path.insert(0, _p)
+for _sub in ("pdf",):
+    _p = os.path.join(_HERE, _sub)
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 for _sub in ("extract_align/extractor", "extract_align/alligner"):
     _p = os.path.join(_HERE, *_sub.split("/"))
     if _p not in sys.path:
@@ -517,3 +521,35 @@ def process_pdf_export(xlsx_bytes, work_dir):
     """
     import gst_report_pdf
     return {"output_bytes": gst_report_pdf.render_workbook_pdf(xlsx_bytes, work_dir)}
+
+
+def process_pdf_to_excel(files, work_dir):
+    """Converts GSTR-9 / GSTR-9C / BO Profile (and E-Way Bill analytics) PDFs
+    to Excel workbooks using the converters in ../pdf. Document type is
+    auto-detected from each PDF's own text. One bad PDF never fails the rest.
+
+    files: list of (filename, pdf_bytes).
+    Returns {"results": [{"name", "ok", "doc_type", "sheets", "output_name",
+    "output_bytes", "error"}]}.
+    """
+    import gst_pdf_to_excel
+    os.makedirs(work_dir, exist_ok=True)
+    results = []
+    for i, (name, data) in enumerate(files):
+        base = os.path.splitext(os.path.basename(name))[0]
+        in_path = os.path.join(work_dir, f"in_{i}.pdf")
+        out_path = os.path.join(work_dir, f"out_{i}.xlsx")
+        try:
+            with open(in_path, "wb") as fh:
+                fh.write(data)
+            doc_type, titles = gst_pdf_to_excel.convert_one(in_path, out_path)
+            with open(out_path, "rb") as fh:
+                out_bytes = fh.read()
+            results.append({"name": name, "ok": True, "doc_type": doc_type,
+                            "sheets": len(titles), "output_name": base + ".xlsx",
+                            "output_bytes": out_bytes, "error": None})
+        except Exception as ex:  # noqa: BLE001 - report per file, keep going
+            results.append({"name": name, "ok": False, "doc_type": None,
+                            "sheets": 0, "output_name": None,
+                            "output_bytes": None, "error": str(ex)})
+    return {"results": results}

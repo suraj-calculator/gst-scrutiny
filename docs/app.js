@@ -172,6 +172,7 @@ function initRuntime() {
       if (msg.state === "ready") {
         workerReady = true;
         enableAllDropzones();
+        enableConvertDropzone();
         updateRunbar();
       }
     } else if (msg.type === "started") {
@@ -271,6 +272,9 @@ async function callCanonicalPreview(source, name, data, onStarted) {
 }
 async function callFullScrutiny(filePairs, bsPlData, onStarted) {
   return await callWorker("full_scrutiny", { filePairs, bsPlData }, { onStarted, timeoutMs: FULL_SCRUTINY_TIMEOUT_MS });
+}
+async function callPdfToExcel(filePairs, onStarted) {
+  return await callWorker("pdf_to_excel", { filePairs }, { onStarted, timeoutMs: FULL_SCRUTINY_TIMEOUT_MS });
 }
 async function callPdfExport(xlsxBytes, onStarted) {
   // Reuses the long timeout — rendering every sheet of a full year's
@@ -1105,3 +1109,58 @@ function startApp() {
 }
 
 document.addEventListener("auth:ok", startApp, { once: true });
+
+
+// ---------------------------------------------------------------------
+// Convert PDF to Excel view (sidebar "Convert PDF to Excel")
+// ---------------------------------------------------------------------
+const cvDrop = document.getElementById("cv-drop");
+const cvInput = document.getElementById("cv-input");
+const cvHint = document.getElementById("cv-hint");
+const cvResults = document.getElementById("cv-results");
+const CV_DOC_LABELS = { gstr9: "GSTR-9", gstr9c: "GSTR-9C", bo_profile: "BO Profile", ewb_analytics: "E-Way Bill Analytics" };
+let cvBusy = false;
+
+function enableConvertDropzone() {
+  cvDrop.dataset.disabled = "false";
+  cvHint.textContent = "GSTR-9, GSTR-9C or BO Profile PDFs \u2014 several at once is fine";
+}
+
+async function convertPdfFiles(fileList) {
+  const pdfs = Array.from(fileList).filter(f => /\.pdf$/i.test(f.name));
+  if (!pdfs.length) { toast("Please choose PDF files."); return; }
+  if (cvBusy) { toast("A conversion is already running."); return; }
+  cvBusy = true;
+  cvDrop.dataset.disabled = "true";
+  cvResults.innerHTML = `<div class="result-line"><span>Converting ${pdfs.length} PDF${pdfs.length > 1 ? "s" : ""}\u2026 the first run also installs the PDF reader, which can take a little while.</span></div>`;
+  try {
+    const filePairs = [];
+    for (const f of pdfs) filePairs.push([f.name, new Uint8Array(await f.arrayBuffer())]);
+    const res = await callPdfToExcel(filePairs);
+    const rows = res.results.map((r, i) => r.ok
+      ? `<div class="result-line"><span><strong>${escapeHtml(r.name)}</strong> \u2192 ${escapeHtml(CV_DOC_LABELS[r.doc_type] || r.doc_type)}, ${r.sheets} sheets</span>
+           <button class="btn small" data-cv="${i}" type="button">Download ${escapeHtml(r.output_name)}</button></div>`
+      : `<div class="result-line warn"><span><strong>${escapeHtml(r.name)}</strong> could not be converted: ${escapeHtml(String(r.error).split("\n")[0])}</span></div>`);
+    cvResults.innerHTML = rows.join("");
+    cvResults.querySelectorAll("button[data-cv]").forEach(btn => {
+      const r = res.results[Number(btn.dataset.cv)];
+      btn.addEventListener("click", () => downloadBytes(r.output_bytes, r.output_name));
+    });
+  } catch (err) {
+    cvResults.innerHTML = `<div class="result-line warn"><span>Conversion failed: ${escapeHtml(String(err.message || err).split("\n")[0])}</span></div>`;
+  } finally {
+    cvBusy = false;
+    enableConvertDropzone();
+    cvInput.value = "";
+  }
+}
+
+cvDrop.addEventListener("click", () => { if (cvDrop.dataset.disabled !== "true") cvInput.click(); });
+cvInput.addEventListener("change", () => convertPdfFiles(cvInput.files));
+cvDrop.addEventListener("dragover", e => { e.preventDefault(); cvDrop.classList.add("drag"); });
+cvDrop.addEventListener("dragleave", () => cvDrop.classList.remove("drag"));
+cvDrop.addEventListener("drop", e => {
+  e.preventDefault();
+  cvDrop.classList.remove("drag");
+  if (cvDrop.dataset.disabled !== "true") convertPdfFiles(e.dataTransfer.files);
+});

@@ -471,6 +471,10 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12 12 4l8 8"/><path d="M6 10v9a1 1 0 0 0 1 1h3v-6h4v6h3a1 1 0 0 0 1-1v-9"/></svg>
       Welcome
     </button>
+    <button class="app-nav-item" data-view="convert" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l4 4v5"/><path d="M7 3a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h5"/><path d="M14 17h7M18 14l3 3-3 3"/></svg>
+      Convert PDF to Excel
+    </button>
     <button class="app-nav-item" data-view="scrutinize" type="button">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h8l4 4v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M14 3v4h4"/><path d="M9 12h6M9 15.5h6M9 8.5h3"/></svg>
       Scrutinize
@@ -512,6 +516,22 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg>
           Go to Scrutinize
         </button>
+      </div>
+    </section>
+
+    <section class="app-view" id="view-convert" hidden>
+      <div class="welcome-view">
+        <span class="welcome-eyebrow">PDF &rarr; Excel</span>
+        <h1>Convert PDF to Excel</h1>
+        <p>Drop your GSTR-9, GSTR-9C or BO Profile PDFs here. The type is detected automatically
+          and each PDF becomes a sectioned Excel workbook you can upload in the Scrutinize tab.
+          Runs entirely in this browser tab &mdash; nothing is uploaded to a server.</p>
+        <div class="dropzone" id="cv-drop" data-disabled="true">
+          <span class="dz-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg></span>
+          <span class="dz-text"><strong>Drop PDFs here or click to choose</strong><span id="cv-hint">Waiting for the Python runtime to load&hellip;</span></span>
+          <input type="file" id="cv-input" accept=".pdf,application/pdf" multiple hidden>
+        </div>
+        <div id="cv-results" style="margin-top:16px"></div>
       </div>
     </section>
 
