@@ -193,7 +193,17 @@ async function callPdfToExcel(filePairs) {
   // pdfplumber (+ pypdfium2) is only needed here, so install it on first use
   // instead of slowing down every page load.
   if (!_pdfplumberReady) {
-    await pyodide.pyimport("micropip").install("pdfplumber");
+    // pdfplumber's latest releases need pillow>=12 and pypdfium2, neither of
+    // which exists for this Pyodide (Pillow 10.2 bundled, no pypdfium2 wheel).
+    // pypdfium2 is only used by pdfplumber's page-to-image rendering, which the
+    // converters never call, so install pdfminer.six (+deps) and pdfplumber with
+    // deps=False, and stub pypdfium2 so pdfplumber's import succeeds.
+    await pyodide.runPythonAsync(`
+import micropip, sys, types
+await micropip.install("pdfminer.six==20251230")
+await micropip.install("pdfplumber==0.11.9", deps=False)
+sys.modules.setdefault("pypdfium2", types.ModuleType("pypdfium2"))
+`);
     _pdfplumberReady = true;
   }
   return await runPy(`
